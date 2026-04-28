@@ -1,12 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Bot,
   CalendarClock,
   Check,
   ChevronRight,
   Download,
+  Eye,
+  EyeOff,
   File,
   FilePlus,
   Folder,
@@ -195,13 +197,22 @@ function Connectors() {
 function Automations() {
   const [items, setItems] = useState<any[]>([]);
   const [raw, setRaw] = useState("");
+  const [jsonError, setJsonError] = useState<string | null>(null);
   async function refresh() {
     const data = await api("/api/automations");
     setItems(data.automations);
     setRaw(JSON.stringify(data.automations, null, 2));
   }
   async function save() {
-    await api("/api/automations", { method: "POST", body: JSON.stringify({ automations: JSON.parse(raw) }) });
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      setJsonError(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    setJsonError(null);
+    await api("/api/automations", { method: "POST", body: JSON.stringify({ automations: parsed }) });
     await refresh();
   }
   useEffect(() => { void refresh(); }, []);
@@ -214,6 +225,7 @@ function Automations() {
       </article>)}</div>
       <section className="editor compactEditor">
         <div className="toolbar"><div><h2>automations.json</h2><p>Validated before save</p></div><button className="iconButton" onClick={save} title="Save"><Save size={18} /></button></div>
+        {jsonError ? <p className="inlineError">{jsonError}</p> : null}
         <textarea value={raw} onChange={(event) => setRaw((event.currentTarget as HTMLTextAreaElement).value)} />
       </section>
     </div>
@@ -230,6 +242,8 @@ function SettingsPage() {
   const [allowedWhatsAppNumber, setAllowedWhatsAppNumber] = useState("");
   const [whatsappEnabled, setWhatsappEnabled] = useState(false);
   const [keys, setKeys] = useState<Record<string, string>>({});
+  const [revealMap, setRevealMap] = useState<Record<string, boolean>>({});
+  const secretKeys = ["openaiApiKey", "exaApiKey", "exaBackupApiKey", "vercelAiGatewayApiKey", "deepgramApiKey"] as const;
   useEffect(() => { void api("/api/settings").then((data) => { setSettings(data); setName(data.profile?.name ?? ""); }); }, []);
   useEffect(() => {
     if (!settings) return;
@@ -255,7 +269,22 @@ function SettingsPage() {
     <div className="settingsGrid">
       <label>Name<input value={name} onChange={(event) => setName((event.currentTarget as HTMLInputElement).value)} /></label>
       <article className="card"><div className="cardTitle"><KeyRound size={18} />External APIs</div><p>Keys are encrypted at rest.</p>
-        {["openaiApiKey", "exaApiKey", "exaBackupApiKey", "vercelAiGatewayApiKey", "deepgramApiKey"].map((key) => <input key={key} value={keys[key] ?? ""} onChange={(event) => setKeys({ ...keys, [key]: (event.currentTarget as HTMLInputElement).value })} placeholder={key} />)}
+        {secretKeys.map((key) => <div className="secretField" key={key}>
+          <input
+            type={revealMap[key] ? "text" : "password"}
+            value={keys[key] ?? ""}
+            onChange={(event) => setKeys({ ...keys, [key]: (event.currentTarget as HTMLInputElement).value })}
+            placeholder={key}
+          />
+          <button
+            className="iconButton"
+            type="button"
+            onClick={() => setRevealMap({ ...revealMap, [key]: !revealMap[key] })}
+            title={revealMap[key] ? `Hide ${key}` : `Reveal ${key}`}
+          >
+            {revealMap[key] ? <EyeOff size={18} /> : <Eye size={18} />}
+          </button>
+        </div>)}
       </article>
       <article className="card"><div className="cardTitle"><Plug size={18} />WhatsApp</div><p>Adapter: Baileys · Connected: {settings?.whatsapp?.connected ? "yes" : "no"}</p>
         <label><input type="checkbox" checked={whatsappEnabled} onChange={(event) => setWhatsappEnabled((event.currentTarget as HTMLInputElement).checked)} /> Enabled</label>

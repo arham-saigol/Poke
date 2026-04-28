@@ -10,11 +10,7 @@ import { appendLog, bootstrapPokeHome, getPokePaths, listAuditEvents, migrateDat
 
 const paths = bootstrapPokeHome();
 seedBundledSkills(paths);
-try {
-  migrateDatabase(paths);
-} catch (error) {
-  appendLog("warn", "storage.sqlite_unavailable", { error: String(error) });
-}
+migrateDatabase(paths);
 const startedAt = new Date();
 const port = Number(process.env.POKE_GATEWAY_PORT ?? 43210);
 const rateLimits = new Map<string, { count: number; resetAt: number }>();
@@ -31,82 +27,89 @@ if (process.env.POKE_ENABLE_WHATSAPP === "1") {
 }
 
 const server = http.createServer(async (request, response) => {
-  if (!allowRequest(request)) {
-    sendJson(response, { error: "rate limit exceeded" }, 429);
-    return;
-  }
-  if (request.url === "/health") {
-    const config = readConfig(paths);
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(
-      JSON.stringify({
-        ok: true,
+  try {
+    if (!allowRequest(request)) {
+      sendJson(response, { error: "rate limit exceeded" }, 429);
+      return;
+    }
+    if (request.url === "/health") {
+      const config = readConfig(paths);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          ok: true,
+          pid: process.pid,
+          uptimeSeconds: Math.floor(process.uptime()),
+          startedAt: startedAt.toISOString(),
+          publicBaseUrl: config.publicBaseUrl
+        })
+      );
+      return;
+    }
+
+    if (request.url === "/runtime") {
+      const runtime = createAgentRuntime();
+      const serializableRuntime = {
+        parentTools: runtime.parentTools.map((name) => ({ name, callable: true })),
+        childTools: runtime.childTools.map((name) => ({ name, callable: true }))
+      };
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(serializableRuntime));
+      return;
+    }
+
+    if (request.url === "/status") {
+      sendJson(response, {
         pid: process.pid,
         uptimeSeconds: Math.floor(process.uptime()),
         startedAt: startedAt.toISOString(),
-        publicBaseUrl: config.publicBaseUrl
-      })
-    );
-    return;
-  }
-
-  if (request.url === "/runtime") {
-    const runtime = createAgentRuntime();
-    const serializableRuntime = {
-      parentTools: runtime.parentTools.map((name) => ({ name, callable: true })),
-      childTools: runtime.childTools.map((name) => ({ name, callable: true }))
-    };
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify(serializableRuntime));
-    return;
-  }
-
-  if (request.url === "/status") {
-    sendJson(response, {
-      pid: process.pid,
-      uptimeSeconds: Math.floor(process.uptime()),
-      startedAt: startedAt.toISOString(),
-      audit: listAuditEvents(20),
-      logs: readRecentLogs(20, paths)
-    });
-    return;
-  }
-
-  if (request.url === "/automations") {
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify(loadAutomations()));
-    return;
-  }
-
-  if (request.url === "/session" && request.method === "GET") {
-    sendJson(response, getActiveSession());
-    return;
-  }
-
-  if (request.url === "/message" && request.method === "POST") {
-    try {
-      const body = await readJsonBody(request);
-      const result = await receiveMessage({ channel: "web", content: String(body.content ?? ""), mediaPath: body.mediaPath });
-      sendJson(response, result.session);
-    } catch (error) {
-      sendJson(response, { error: String(error) }, 400);
+        audit: listAuditEvents(20),
+        logs: readRecentLogs(20, paths)
+      });
+      return;
     }
-    return;
-  }
 
-  if (request.url === "/whatsapp/inbound" && request.method === "POST") {
-    try {
-      const body = await readJsonBody(request);
-      const result = await receiveMessage({ channel: "whatsapp", content: String(body.content ?? ""), mediaPath: body.mediaPath, from: body.from });
-      sendJson(response, result.session);
-    } catch (error) {
-      sendJson(response, { error: String(error) }, 403);
+    if (request.url === "/automations") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(loadAutomations()));
+      return;
     }
-    return;
-  }
 
-  response.writeHead(200, { "content-type": "text/plain" });
-  response.end("Poke gateway is running.\n");
+    if (request.url === "/session" && request.method === "GET") {
+      sendJson(response, getActiveSession());
+      return;
+    }
+
+    if (request.url === "/message" && request.method === "POST") {
+      try {
+        const body = await readJsonBody(request);
+        const result = await receiveMessage({ channel: "web", content: String(body.content ?? ""), mediaPath: body.mediaPath });
+        sendJson(response, result.session);
+      } catch (error) {
+        sendJson(response, { error: String(error) }, 400);
+      }
+      return;
+    }
+
+    if (request.url === "/whatsapp/inbound" && request.method === "POST") {
+      try {
+        const body = await readJsonBody(request);
+        const result = await receiveMessage({ channel: "whatsapp", content: String(body.content ?? ""), mediaPath: body.mediaPath, from: body.from });
+        sendJson(response, result.session);
+      } catch (error) {
+        sendJson(response, { error: String(error) }, 403);
+      }
+      return;
+    }
+
+    response.writeHead(200, { "content-type": "text/plain" });
+    response.end("Poke gateway is running.\n");
+  } catch (error) {
+    appendLog("error", "gateway.http_handler_error", { error: error instanceof Error ? error.stack ?? error.message : String(error) });
+    if (!response.headersSent) {
+      sendJson(response, { error: "internal server error" }, 500);
+    }
+  }
 });
 
 function sendJson(response: http.ServerResponse, body: unknown, status = 200): void {
@@ -117,20 +120,70 @@ function sendJson(response: http.ServerResponse, body: unknown, status = 200): v
 function readJsonBody(request: http.IncomingMessage): Promise<Record<string, any>> {
   return new Promise((resolve, reject) => {
     let raw = "";
-    request.on("data", (chunk) => {
+    let settled = false;
+    const signal = (request as http.IncomingMessage & { signal?: AbortSignal }).signal;
+
+    const cleanup = () => {
+      request.off("data", onData);
+      request.off("end", onEnd);
+      request.off("error", onError);
+      request.off("close", onClose);
+      signal?.removeEventListener("abort", onAbort);
+    };
+
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error instanceof Error ? error : new Error(String(error)));
+    };
+
+    const onData = (chunk: Buffer | string) => {
+      if (settled) return;
       raw += String(chunk);
       if (Buffer.byteLength(raw) > 1024 * 1024) {
-        reject(new Error("request body too large"));
+        fail(new Error("request body too large"));
         request.destroy();
       }
-    });
-    request.on("end", () => {
+    };
+
+    const onEnd = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
       try {
         resolve(raw ? JSON.parse(raw) : {});
       } catch (error) {
         reject(error);
       }
-    });
+    };
+
+    const onError = (error: Error) => {
+      fail(error);
+    };
+
+    const onClose = () => {
+      if (!settled && !request.complete) {
+        fail(new Error("request body closed before completion"));
+      }
+    };
+
+    const onAbort = () => {
+      fail(new Error("request aborted"));
+    };
+
+    request.on("data", onData);
+    request.once("end", onEnd);
+    request.once("error", onError);
+    request.once("close", onClose);
+
+    if (signal) {
+      if (signal.aborted) {
+        fail(new Error("request aborted"));
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
   });
 }
 

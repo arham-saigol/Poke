@@ -27,6 +27,34 @@ export function resolveRootFile(root: string, relativePath = ""): string {
   return resolvedPath;
 }
 
+export function resolveRootFileSafe(root: string, relativePath = ""): string {
+  const resolvedPath = safeResolve(rootPath(root), relativePath);
+  
+  try {
+    // Resolve symlinks to prevent symlink-based path traversal attacks
+    const realRoot = fs.realpathSync(rootPath(root));
+    const realResolved = fs.realpathSync(resolvedPath);
+    
+    // Verify the real resolved path is within the real root
+    if (!realResolved.startsWith(realRoot + path.sep) && realResolved !== realRoot) {
+      throw new Error(`Path traversal detected: ${relativePath} resolves outside root`);
+    }
+    
+    return resolvedPath;
+  } catch (err: any) {
+    // If file doesn't exist (ENOENT), fall back to path.resolve for validation
+    if (err.code === "ENOENT") {
+      const realRoot = fs.realpathSync(rootPath(root));
+      // Verify the resolved path is within the root (without following symlinks for non-existent path)
+      if (!resolvedPath.startsWith(realRoot + path.sep) && resolvedPath !== realRoot) {
+        throw new Error(`Path traversal detected: ${relativePath} resolves outside root`);
+      }
+      return resolvedPath;
+    }
+    throw err;
+  }
+}
+
 export function fileTree(root: string, relativePath = ""): Array<{ name: string; path: string; type: "file" | "directory"; children?: any[] }> {
   const base = resolveRootFile(root, relativePath);
   if (!fs.existsSync(base)) return [];

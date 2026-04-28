@@ -33,12 +33,12 @@ export const parentTools = {
   read_memory: ({ path }: { path: string }) => readMemory(path),
   write_memory: (input: { path: string; title?: string; content: string }) => writeMemory(input),
   delete_memory: ({ path }: { path: string }) => deleteMemory(path),
-  ask_poke: async (input: { task: string; reasoning: ReasoningLevel }) => {
+  ask_poke: async (input: { task: string; reasoning: ReasoningLevel; signal?: AbortSignal }) => {
     appendLog("info", "agent.child_task.start", { reasoning: input.reasoning });
     if (input.reasoning !== "low") {
       appendLog("warn", "agent.child_reasoning_escalated", { reasoning: input.reasoning });
     }
-    const output = await completeWithPi(input.task, input.reasoning);
+    const output = await completeWithPi(input.task, input.reasoning, input.signal);
     return { output, artifacts: [] };
   },
   send_message: async (input: { content: string; media_path?: string }) => {
@@ -120,7 +120,7 @@ function workspacePath(inputPath: string): string {
   return safeResolve(paths.workspace, inputPath);
 }
 
-async function completeWithPi(task: string, reasoning: ReasoningLevel): Promise<string> {
+async function completeWithPi(task: string, reasoning: ReasoningLevel, signal?: AbortSignal): Promise<string> {
   const config = readConfig();
   const childModelConfig = config.models.child;
   
@@ -142,7 +142,11 @@ async function completeWithPi(task: string, reasoning: ReasoningLevel): Promise<
   }
   
   // Create model with API key to avoid race conditions from mutating process.env
-  const model = getModel(provider, childModelConfig.model, apiKey ? { apiKey } : undefined);
+  const model = (getModel as unknown as (provider: string, model: string, options?: { apiKey?: string }) => unknown)(
+    provider,
+    childModelConfig.model,
+    apiKey ? { apiKey } : undefined
+  );
   
   const runtime = createAgentRuntime();
   const systemPrompt = runtime.childSystemPrompt;
@@ -156,14 +160,15 @@ async function completeWithPi(task: string, reasoning: ReasoningLevel): Promise<
       parameters: getToolParameters(name as ToolName)
     }));
   
-  const response = await completeSimple(model, {
+  const response = await completeSimple(model as Parameters<typeof completeSimple>[0], {
+    systemPrompt,
     messages: [
-      { role: "system", content: systemPrompt, timestamp: Date.now() },
       { role: "user", content: task, timestamp: Date.now() }
     ],
     tools: toolDefinitions.length > 0 ? toolDefinitions : undefined
   }, {
-    reasoning
+    reasoning,
+    signal
   });
   
   return response.content

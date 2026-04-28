@@ -111,10 +111,22 @@ program
       return;
     }
     try {
-      process.kill(pid, "SIGTERM");
-      console.log(`Sent SIGTERM to Poke daemon pid ${pid}.`);
-      
-      // Remove PID file after successful kill
+      try {
+        process.kill(pid, "SIGTERM");
+        console.log(`Sent SIGTERM to Poke daemon pid ${pid}.`);
+      } catch (error: any) {
+        if (error?.code !== "ESRCH") {
+          throw error;
+        }
+        console.log(`Process ${pid} is not running.`);
+      }
+
+      if (!waitForProcessExit(pid, 5000)) {
+        console.error(`Process ${pid} did not exit within timeout.`);
+        process.exitCode = 1;
+        return;
+      }
+
       try {
         fs.rmSync(paths.pid, { force: true });
       } catch (unlinkError) {
@@ -357,6 +369,21 @@ function processExists(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+function waitForProcessExit(pid: number, timeoutMs: number): boolean {
+  const startTime = Date.now();
+  while (Date.now() - startTime < timeoutMs) {
+    if (!processExists(pid)) {
+      return true;
+    }
+    sleepMs(100);
+  }
+  return !processExists(pid);
+}
+
+function sleepMs(duration: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, duration);
 }
 
 function commandExists(command: string): boolean {

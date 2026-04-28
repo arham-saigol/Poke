@@ -1,13 +1,20 @@
 import { connectConnector, getConnectorState, listConnectors, setConnectorEnabled } from "@poke/connectors";
 import { connectorNameSchema } from "@poke/shared";
+import { checkAuth } from "../auth";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(): Promise<Response> {
+export async function GET(request: Request): Promise<Response> {
+  const authError = checkAuth(request);
+  if (authError) return authError;
+
   return Response.json({ connectors: listConnectors() });
 }
 
 export async function POST(request: Request): Promise<Response> {
+  const authError = checkAuth(request);
+  if (authError) return authError;
+
   const body = await request.json() as any;
   const name = connectorNameSchema.parse(body.name);
   let state = getConnectorState(name);

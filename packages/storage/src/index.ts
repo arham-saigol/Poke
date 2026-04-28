@@ -15,6 +15,7 @@ export type PokePaths = {
   home: string;
   config: string;
   secrets: string;
+  secretKey: string;
   database: string;
   pid: string;
   session: string;
@@ -39,6 +40,7 @@ export function getPokePaths(home = getPokeHome()): PokePaths {
     home,
     config: path.join(home, "config.json"),
     secrets: path.join(home, "secrets.enc.json"),
+    secretKey: path.join(home, ".secret-key"),
     database: path.join(home, "poke.db"),
     pid: path.join(home, "poke.pid"),
     session: path.join(home, "session.json"),
@@ -259,43 +261,42 @@ type SecretsFile = {
 
 function secretKey(): Buffer {
   const paths = getPokePaths();
-  const keyFile = path.join(paths.home, ".secret-key");
-  
+
   // If POKE_SECRET_KEY is provided, use it
   if (process.env.POKE_SECRET_KEY) {
     return crypto.createHash("sha256").update(process.env.POKE_SECRET_KEY).digest();
   }
-  
+
   // Try to read existing key file
-  if (fs.existsSync(keyFile)) {
+  if (fs.existsSync(paths.secretKey)) {
     try {
-      const keyData = fs.readFileSync(keyFile, "utf8");
+      const keyData = fs.readFileSync(paths.secretKey, "utf8");
       return Buffer.from(keyData, "hex");
     } catch (error) {
       appendLog("warn", "storage.secret_key_read_failed", { error: String(error) });
     }
   }
-  
+
   // Generate a new cryptographically secure key
   const newKey = crypto.randomBytes(32);
-  
+
   try {
     // Write the key to file with restrictive permissions
     ensureDir(paths.home);
-    fs.writeFileSync(keyFile, newKey.toString("hex"), { mode: 0o600 });
-    appendLog("warn", "storage.secret_key_generated", { 
+    fs.writeFileSync(paths.secretKey, newKey.toString("hex"), { mode: 0o600 });
+    appendLog("warn", "storage.secret_key_generated", {
       message: "Generated new encryption key. For production use, set POKE_SECRET_KEY environment variable."
     });
   } catch (error) {
     appendLog("error", "storage.secret_key_write_failed", { error: String(error) });
     // Fall back to derived key if we can't write the file
     const fallback = `${os.userInfo().username}:${os.hostname()}:poke-local-secret`;
-    appendLog("warn", "storage.secret_key_fallback", { 
+    appendLog("warn", "storage.secret_key_fallback", {
       message: "Using derived key as fallback. This is less secure. Set POKE_SECRET_KEY for better security."
     });
     return crypto.createHash("sha256").update(fallback).digest();
   }
-  
+
   return newKey;
 }
 
@@ -329,9 +330,7 @@ export function createInitialSecrets(paths = getPokePaths()): void {
 }
 
 export function setSecret(name: string, value: string, paths = getPokePaths()): void {
-  const file = readSecretsFile(paths);
-  file.values[name] = encrypt(value);
-  writeJson(paths.secrets, file);
+  updateSecrets({ [name]: value }, paths);
 }
 
 export function getSecret(name: string, paths = getPokePaths()): string | null {
@@ -341,8 +340,19 @@ export function getSecret(name: string, paths = getPokePaths()): string | null {
 }
 
 export function deleteSecret(name: string, paths = getPokePaths()): void {
+  updateSecrets({ [name]: null }, paths);
+}
+
+export function updateSecrets(updates: Record<string, string | null | undefined>, paths = getPokePaths()): void {
   const file = readSecretsFile(paths);
-  delete file.values[name];
+  for (const [name, value] of Object.entries(updates)) {
+    if (value === undefined) continue;
+    if (value === null || value === "") {
+      delete file.values[name];
+      continue;
+    }
+    file.values[name] = encrypt(value);
+  }
   writeJson(paths.secrets, file);
 }
 
@@ -353,11 +363,16 @@ function readSecretsFile(paths = getPokePaths()): SecretsFile {
 export function createBackup(label = "manual", paths = getPokePaths()): string {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const hrtime = process.hrtime.bigint();
-  const target = path.join(paths.backups, `${stamp}-${hrtime}-${label}`);
+  const sanitizedLabel = sanitizeBackupLabel(label);
+  const target = path.join(paths.backups, `${stamp}-${hrtime}-${sanitizedLabel}`);
+  if (!pathInside(paths.backups, target)) {
+    throw new Error(`Backup target escapes backup directory: ${target}`);
+  }
   ensureDir(target);
   const entries = [
     paths.config,
     paths.secrets,
+    paths.secretKey,
     paths.database,
     paths.automations,
     paths.memory,
@@ -369,7 +384,7 @@ export function createBackup(label = "manual", paths = getPokePaths()): string {
     const destination = path.join(target, path.basename(entry));
     fs.cpSync(entry, destination, { recursive: true, force: true, errorOnExist: true });
   }
-  audit("backup.create", target, { label });
+  audit("backup.create", target, { label: sanitizedLabel });
   return target;
 }
 
@@ -382,6 +397,7 @@ export function restoreBackup(backupPath: string, paths = getPokePaths()): { res
   const entries = [
     "config.json",
     "secrets.enc.json",
+    ".secret-key",
     "poke.db",
     "automations.json",
     "memory",
@@ -442,4 +458,14 @@ function redactSecrets(value: unknown): unknown {
     }
   }
   return result;
+}
+
+function sanitizeBackupLabel(label: string): string {
+  const sanitized = label
+    .replace(/[\\/]+/g, "-")
+    .replace(/\.\.+/g, "-")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-._]+|[-._]+$/g, "");
+  return sanitized || "manual";
 }

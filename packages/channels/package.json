@@ -3,16 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "generated-dist/index.js",
+  "types": "generated-dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./generated-dist/index.d.ts",
+      "import": "./generated-dist/index.js"
     },
     "./whatsapp": {
-      "types": "./dist/whatsapp.d.ts",
-      "import": "./dist/whatsapp.js"
+      "types": "./generated-dist/whatsapp.d.ts",
+      "import": "./generated-dist/whatsapp.js"
     }
   },
   "scripts": {

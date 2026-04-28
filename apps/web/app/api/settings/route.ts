@@ -1,13 +1,20 @@
 import { getWhatsAppStatus } from "@poke/channels";
-import { deleteSecret, readConfig, setSecret, writeConfig } from "@poke/storage";
+import { readConfig, updateSecrets, writeConfig } from "@poke/storage";
+import { checkAuth } from "../auth";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(): Promise<Response> {
+export async function GET(request: Request): Promise<Response> {
+  const authError = checkAuth(request);
+  if (authError) return authError;
+
   return Response.json({ config: readConfig(), whatsapp: getWhatsAppStatus(), profile: { name: "Owner" } });
 }
 
 export async function POST(request: Request): Promise<Response> {
+  const authError = checkAuth(request);
+  if (authError) return authError;
+
   const body = await request.json() as any;
   const config = readConfig();
   if (typeof body.allowedWhatsAppNumber === "string") {
@@ -16,21 +23,14 @@ export async function POST(request: Request): Promise<Response> {
   if (typeof body.whatsappEnabled === "boolean") {
     config.channels.whatsapp.enabled = body.whatsappEnabled;
   }
-  if (typeof body.exaApiKey === "string") {
-    body.exaApiKey ? setSecret("exa-api-key", body.exaApiKey) : deleteSecret("exa-api-key");
-  }
-  if (typeof body.exaBackupApiKey === "string") {
-    body.exaBackupApiKey ? setSecret("exa-backup-api-key", body.exaBackupApiKey) : deleteSecret("exa-backup-api-key");
-  }
-  if (typeof body.vercelAiGatewayApiKey === "string") {
-    body.vercelAiGatewayApiKey ? setSecret("vercel-ai-gateway-api-key", body.vercelAiGatewayApiKey) : deleteSecret("vercel-ai-gateway-api-key");
-  }
-  if (typeof body.deepgramApiKey === "string") {
-    body.deepgramApiKey ? setSecret("deepgram-api-key", body.deepgramApiKey) : deleteSecret("deepgram-api-key");
-  }
-  if (typeof body.openaiApiKey === "string") {
-    body.openaiApiKey ? setSecret("openai-api-key", body.openaiApiKey) : deleteSecret("openai-api-key");
-  }
+  const secretUpdates: Record<string, string | null | undefined> = {
+    "exa-api-key": typeof body.exaApiKey === "string" ? body.exaApiKey || null : undefined,
+    "exa-backup-api-key": typeof body.exaBackupApiKey === "string" ? body.exaBackupApiKey || null : undefined,
+    "vercel-ai-gateway-api-key": typeof body.vercelAiGatewayApiKey === "string" ? body.vercelAiGatewayApiKey || null : undefined,
+    "deepgram-api-key": typeof body.deepgramApiKey === "string" ? body.deepgramApiKey || null : undefined,
+    "openai-api-key": typeof body.openaiApiKey === "string" ? body.openaiApiKey || null : undefined
+  };
+  updateSecrets(secretUpdates);
   writeConfig(config);
   return Response.json({ config, whatsapp: getWhatsAppStatus() });
 }

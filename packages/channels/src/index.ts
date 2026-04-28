@@ -15,6 +15,10 @@ export type MessageResult = {
   responseMessage: ChatMessage | null;
 };
 
+const ACTIVE_SESSION_LOCK = "active-session";
+const sessionQueues = new Map<string, Promise<unknown>>();
+const runningRequests = new Map<string, Set<AbortController>>();
+
 export function getActiveSession(): ActiveSession {
   const paths = bootstrapPokeHome();
   if (!fs.existsSync(paths.session)) {
@@ -59,31 +63,45 @@ export async function receiveMessage(input: IncomingMessageInput): Promise<Messa
     const responseMessage = session.messages[session.messages.length - 1] ?? null;
     return { session, responseMessage };
   }
-  const session = getActiveSession();
-  session.status = "running";
-  session.messages.push(message("user", input.channel, input.content, input.mediaPath, session.id));
-  session.updatedAt = new Date().toISOString();
-  
-  // Persist session immediately after adding user message and setting status
-  writeSession(session);
-  
+  const { result } = await mutateActiveSession((current) => {
+    current.status = "running";
+    current.messages.push(message("user", input.channel, input.content, input.mediaPath, current.id));
+    return { reasoning: current.reasoning, sessionId: current.id };
+  });
+  const controller = new AbortController();
+  registerRunningRequest(result.sessionId, controller);
+
   try {
     const loadRuntime = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<any>;
     const { parentTools } = await loadRuntime("@poke/agent-runtime");
-    const child = await parentTools.ask_poke({ task: input.content, reasoning: session.reasoning });
-    const responseMessage = message("assistant", input.channel, child.output, undefined, session.id);
-    session.messages.push(responseMessage);
-    session.status = "idle";
-    session.updatedAt = new Date().toISOString();
-    writeSession(session);
-    appendLog("info", "channel.message.processed", { channel: input.channel, sessionId: session.id });
-    return { session, responseMessage };
+    const child = await parentTools.ask_poke({ task: input.content, reasoning: result.reasoning, signal: controller.signal });
+    unregisterRunningRequest(result.sessionId, controller);
+    const responseMessage = message("assistant", input.channel, child.output, undefined, result.sessionId);
+    const completion = await mutateActiveSession((current) => {
+      if (current.id !== result.sessionId || controller.signal.aborted || current.status === "aborted") {
+        return { responseMessage: null as ChatMessage | null, shouldLog: false };
+      }
+      current.messages.push(responseMessage);
+      current.status = "idle";
+      return { responseMessage, shouldLog: true };
+    });
+    if (completion.result.shouldLog) {
+      appendLog("info", "channel.message.processed", { channel: input.channel, sessionId: result.sessionId });
+    }
+    return { session: completion.session, responseMessage: completion.result.responseMessage };
   } catch (error) {
-    // Update session status on error and persist
-    session.status = "idle";
-    session.updatedAt = new Date().toISOString();
-    session.messages.push(message("system", "system", `Error processing message: ${String(error)}`, undefined, session.id));
-    writeSession(session);
+    unregisterRunningRequest(result.sessionId, controller);
+    if (controller.signal.aborted) {
+      const aborted = getActiveSession();
+      return { session: aborted, responseMessage: null };
+    }
+    await mutateActiveSession((current) => {
+      if (current.id !== result.sessionId) {
+        return;
+      }
+      current.status = "idle";
+      current.messages.push(message("system", "system", `Error processing message: ${String(error)}`, undefined, current.id));
+    });
     throw error;
   }
 }
@@ -96,6 +114,7 @@ export function handleSlashCommand(command: string, channel: Channel): ActiveSes
     session.status = "aborted";
     session.messages.push(message("system", "system", "Current Poke activity was aborted.", undefined, session.id));
     audit("session.abort", session.id, { channel });
+    abortRunningRequests(session.id);
   } else if (name === "/reasoning") {
     const level = parseReasoning(arg);
     session.reasoning = level;
@@ -131,7 +150,7 @@ export function getWhatsAppStatus(): {
     allowedNumber: config.channels.whatsapp.allowedNumber,
     connected: false,
     instructions:
-      "Baileys transport is installed. Start the gateway with POKE_ENABLE_WHATSAPP=1 after setting an allowed WhatsApp number; pairing codes and QR strings are written to gateway logs."
+      "Baileys transport is installed. Start the gateway with POKE_ENABLE_WHATSAPP=1 after setting an allowed WhatsApp number; pairing material is kept in memory instead of gateway logs."
   };
 }
 
@@ -153,7 +172,7 @@ function assertAllowedWhatsAppSender(from?: string): void {
 }
 
 function normalizePhone(value: string): string {
-  return value.replace(/[^\d+]/g, "");
+  return value.replace(/\D/g, "");
 }
 
 function parseReasoning(value?: string): ReasoningLevel {
@@ -171,4 +190,51 @@ function message(role: ChatMessage["role"], channel: Channel, content: string, m
     mediaPath,
     createdAt: new Date().toISOString()
   };
+}
+
+async function mutateActiveSession<T>(mutate: (session: ActiveSession) => Promise<T> | T): Promise<{ session: ActiveSession; result: T }> {
+  return withSessionLock(ACTIVE_SESSION_LOCK, async () => {
+    const session = getActiveSession();
+    const result = await mutate(session);
+    session.updatedAt = new Date().toISOString();
+    writeSession(session);
+    return { session, result };
+  });
+}
+
+async function withSessionLock<T>(sessionId: string, task: () => Promise<T> | T): Promise<T> {
+  const previous = sessionQueues.get(sessionId) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(() => task());
+  let chained: Promise<unknown>;
+  chained = next.finally(() => {
+    if (sessionQueues.get(sessionId) === chained) {
+      sessionQueues.delete(sessionId);
+    }
+  });
+  sessionQueues.set(sessionId, chained);
+  return next;
+}
+
+function registerRunningRequest(sessionId: string, controller: AbortController): void {
+  const controllers = runningRequests.get(sessionId) ?? new Set<AbortController>();
+  controllers.add(controller);
+  runningRequests.set(sessionId, controllers);
+}
+
+function unregisterRunningRequest(sessionId: string, controller: AbortController): void {
+  const controllers = runningRequests.get(sessionId);
+  if (!controllers) return;
+  controllers.delete(controller);
+  if (controllers.size === 0) {
+    runningRequests.delete(sessionId);
+  }
+}
+
+function abortRunningRequests(sessionId: string): void {
+  const controllers = runningRequests.get(sessionId);
+  if (!controllers) return;
+  for (const controller of controllers) {
+    controller.abort();
+  }
+  runningRequests.delete(sessionId);
 }
