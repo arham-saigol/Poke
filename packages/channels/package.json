@@ -1,0 +1,32 @@
+{
+  "name": "@poke/channels",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./whatsapp": {
+      "types": "./dist/whatsapp.d.ts",
+      "import": "./dist/whatsapp.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@chat-adapter/state-memory": "^4.26.0",
+    "@poke/agent-runtime": "workspace:*",
+    "@poke/shared": "workspace:*",
+    "@poke/storage": "workspace:*",
+    "baileys": "7.0.0-rc.9",
+    "chat": "^4.26.0",
+    "chat-adapter-baileys": "^2.0.2",
+    "qrcode": "^1.5.4"
+  }
+}

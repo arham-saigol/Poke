@@ -1,0 +1,20 @@
+{
+  "name": "@poke/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "poke": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "poke": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@poke/memory": "workspace:*",
+    "@poke/skills": "workspace:*",
+    "@poke/storage": "workspace:*",
+    "commander": "^14.0.2"
+  }
+}

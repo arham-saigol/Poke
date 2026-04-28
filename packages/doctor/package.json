@@ -1,0 +1,17 @@
+{
+  "name": "@poke/doctor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "poke-doctor": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "poke-doctor": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@poke/storage": "workspace:*"
+  }
+}

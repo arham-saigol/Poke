@@ -1,0 +1,21 @@
+[Unit]
+Description=Poke personal agent daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/poke
+Environment=NODE_ENV=production
+Environment=POKE_HOME=%h/.poke
+ExecStart=/usr/bin/env poke start --foreground
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=%h/.poke /opt/poke
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,20 @@
+{
+  "name": "@poke/agent-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@mariozechner/pi-ai": "^0.70.5",
+    "@poke/connectors": "workspace:*",
+    "@poke/memory": "workspace:*",
+    "@poke/shared": "workspace:*",
+    "@poke/skills": "workspace:*",
+    "@poke/storage": "workspace:*"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "name": "@poke/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "next build --webpack",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "dev": "next dev --hostname 127.0.0.1 --port 3000",
+    "start": "next start --hostname 127.0.0.1 --port 3000"
+  },
+  "dependencies": {
+    "@poke/automations": "workspace:*",
+    "@poke/channels": "workspace:*",
+    "@poke/connectors": "workspace:*",
+    "@poke/memory": "workspace:*",
+    "@poke/shared": "workspace:*",
+    "@poke/skills": "workspace:*",
+    "@poke/storage": "workspace:*",
+    "lucide-react": "^0.556.0",
+    "next": "^16.0.7",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3"
+  }
+}
