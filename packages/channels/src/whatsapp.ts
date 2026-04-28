@@ -33,13 +33,12 @@ export async function createWhatsAppRuntime(): Promise<WhatsAppRuntime> {
   });
   bot.onNewMessage(/.+/, async (thread, message) => {
     if (!thread.isDM || message.author.isMe) return;
-    const session = await receiveMessage({
+    const result = await receiveMessage({
       channel: "whatsapp",
       content: message.text ?? "",
       from: message.author.userId
     });
-    const reply = [...session.messages].reverse().find((item) => item.role === "assistant");
-    if (reply?.content) await thread.post(reply.content);
+    if (result.responseMessage?.content) await thread.post(result.responseMessage.content);
   });
   await bot.initialize();
   return {

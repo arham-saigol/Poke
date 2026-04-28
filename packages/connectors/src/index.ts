@@ -81,6 +81,16 @@ export function connectConnector(name: ConnectorName, tokenOrKey: string): Conne
 }
 
 export function setConnectorEnabled(name: ConnectorName, enabled: boolean): ConnectorState {
+  // If enabling, validate that credentials exist
+  if (enabled) {
+    const state = getConnectorState(name);
+    const secret = getSecret(secretName(name));
+    
+    if (!secret) {
+      throw new Error(`Cannot enable ${state.displayName} connector: credentials are missing. Please connect the connector first.`);
+    }
+  }
+  
   setSecret(enabledName(name), String(enabled));
   return getConnectorState(name);
 }

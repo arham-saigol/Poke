@@ -9,7 +9,12 @@ The default seeded automation is weekly memory cleanup:
 ```json
 {
   "name": "Weekly memory cleanup",
+  "description": "Automatically clean up old memories every Sunday at 2 AM",
+  "enabled": true,
+  "kind": "recurring",
   "schedule": { "type": "cron", "value": "0 2 * * 0", "timezone": "Asia/Karachi" },
-  "action": { "type": "command", "command": "poke memory cleanup" }
+  "action": { "type": "command", "command": "poke memory cleanup" },
+  "createdBy": "system",
+  "updatedAt": "2026-04-28T00:00:00Z"
 }
 ```

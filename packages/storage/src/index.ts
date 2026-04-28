@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
+// Note: node:sqlite is an unstable RC API. We attempt to use it but fall back to better-sqlite3 if unavailable.
 import {
   automationsFileSchema,
   defaultModels,
@@ -173,7 +173,22 @@ export function writeJson(file: string, value: unknown): void {
 
 export function openDatabase(paths = getPokePaths()): any {
   ensureDir(path.dirname(paths.database));
-  return new DatabaseSync(paths.database);
+  
+  // Try node:sqlite first (unstable RC API)
+  try {
+    const { DatabaseSync } = require("node:sqlite");
+    return new DatabaseSync(paths.database);
+  } catch (sqliteError) {
+    // Fall back to better-sqlite3
+    try {
+      const Database = require("better-sqlite3");
+      return new Database(paths.database);
+    } catch (betterSqliteError) {
+      throw new Error(
+        `Failed to load database driver. Tried node:sqlite (${String(sqliteError)}) and better-sqlite3 (${String(betterSqliteError)}). Install better-sqlite3 or use Node.js with sqlite support.`
+      );
+    }
+  }
 }
 
 export function migrateDatabase(paths = getPokePaths()): void {
@@ -243,8 +258,45 @@ type SecretsFile = {
 };
 
 function secretKey(): Buffer {
-  const source = process.env.POKE_SECRET_KEY ?? `${os.userInfo().username}:${os.hostname()}:poke-local-secret`;
-  return crypto.createHash("sha256").update(source).digest();
+  const paths = getPokePaths();
+  const keyFile = path.join(paths.home, ".secret-key");
+  
+  // If POKE_SECRET_KEY is provided, use it
+  if (process.env.POKE_SECRET_KEY) {
+    return crypto.createHash("sha256").update(process.env.POKE_SECRET_KEY).digest();
+  }
+  
+  // Try to read existing key file
+  if (fs.existsSync(keyFile)) {
+    try {
+      const keyData = fs.readFileSync(keyFile, "utf8");
+      return Buffer.from(keyData, "hex");
+    } catch (error) {
+      appendLog("warn", "storage.secret_key_read_failed", { error: String(error) });
+    }
+  }
+  
+  // Generate a new cryptographically secure key
+  const newKey = crypto.randomBytes(32);
+  
+  try {
+    // Write the key to file with restrictive permissions
+    ensureDir(paths.home);
+    fs.writeFileSync(keyFile, newKey.toString("hex"), { mode: 0o600 });
+    appendLog("warn", "storage.secret_key_generated", { 
+      message: "Generated new encryption key. For production use, set POKE_SECRET_KEY environment variable."
+    });
+  } catch (error) {
+    appendLog("error", "storage.secret_key_write_failed", { error: String(error) });
+    // Fall back to derived key if we can't write the file
+    const fallback = `${os.userInfo().username}:${os.hostname()}:poke-local-secret`;
+    appendLog("warn", "storage.secret_key_fallback", { 
+      message: "Using derived key as fallback. This is less secure. Set POKE_SECRET_KEY for better security."
+    });
+    return crypto.createHash("sha256").update(fallback).digest();
+  }
+  
+  return newKey;
 }
 
 function encrypt(value: string): string {
@@ -288,13 +340,20 @@ export function getSecret(name: string, paths = getPokePaths()): string | null {
   return value ? decrypt(value) : null;
 }
 
+export function deleteSecret(name: string, paths = getPokePaths()): void {
+  const file = readSecretsFile(paths);
+  delete file.values[name];
+  writeJson(paths.secrets, file);
+}
+
 function readSecretsFile(paths = getPokePaths()): SecretsFile {
   return JSON.parse(fs.readFileSync(paths.secrets, "utf8")) as SecretsFile;
 }
 
 export function createBackup(label = "manual", paths = getPokePaths()): string {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const target = path.join(paths.backups, `${stamp}-${label}`);
+  const hrtime = process.hrtime.bigint();
+  const target = path.join(paths.backups, `${stamp}-${hrtime}-${label}`);
   ensureDir(target);
   const entries = [
     paths.config,
@@ -308,7 +367,7 @@ export function createBackup(label = "manual", paths = getPokePaths()): string {
   for (const entry of entries) {
     if (!fs.existsSync(entry)) continue;
     const destination = path.join(target, path.basename(entry));
-    fs.cpSync(entry, destination, { recursive: true, force: false, errorOnExist: false });
+    fs.cpSync(entry, destination, { recursive: true, force: true, errorOnExist: true });
   }
   audit("backup.create", target, { label });
   return target;

@@ -19,8 +19,6 @@ const startedAt = new Date();
 const port = Number(process.env.POKE_GATEWAY_PORT ?? 43210);
 const rateLimits = new Map<string, { count: number; resetAt: number }>();
 
-fs.writeFileSync(paths.pid, String(process.pid), "utf8");
-appendLog("info", "gateway.start", { pid: process.pid, port });
 let whatsappRuntime: WhatsAppRuntime | null = null;
 if (process.env.POKE_ENABLE_WHATSAPP === "1") {
   createWhatsAppRuntime()
@@ -54,8 +52,12 @@ const server = http.createServer(async (request, response) => {
 
   if (request.url === "/runtime") {
     const runtime = createAgentRuntime();
+    const serializableRuntime = {
+      parentTools: runtime.parentTools.map((name) => ({ name, callable: true })),
+      childTools: runtime.childTools.map((name) => ({ name, callable: true }))
+    };
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ parentTools: runtime.parentTools, childTools: runtime.childTools }));
+    response.end(JSON.stringify(serializableRuntime));
     return;
   }
 
@@ -84,7 +86,8 @@ const server = http.createServer(async (request, response) => {
   if (request.url === "/message" && request.method === "POST") {
     try {
       const body = await readJsonBody(request);
-      sendJson(response, await receiveMessage({ channel: "web", content: String(body.content ?? ""), mediaPath: body.mediaPath }));
+      const result = await receiveMessage({ channel: "web", content: String(body.content ?? ""), mediaPath: body.mediaPath });
+      sendJson(response, result.session);
     } catch (error) {
       sendJson(response, { error: String(error) }, 400);
     }
@@ -94,7 +97,8 @@ const server = http.createServer(async (request, response) => {
   if (request.url === "/whatsapp/inbound" && request.method === "POST") {
     try {
       const body = await readJsonBody(request);
-      sendJson(response, await receiveMessage({ channel: "whatsapp", content: String(body.content ?? ""), mediaPath: body.mediaPath, from: body.from }));
+      const result = await receiveMessage({ channel: "whatsapp", content: String(body.content ?? ""), mediaPath: body.mediaPath, from: body.from });
+      sendJson(response, result.session);
     } catch (error) {
       sendJson(response, { error: String(error) }, 403);
     }
@@ -143,13 +147,26 @@ function allowRequest(request: http.IncomingMessage): boolean {
 }
 
 server.listen(port, "127.0.0.1", () => {
+  fs.writeFileSync(paths.pid, String(process.pid), "utf8");
+  appendLog("info", "gateway.start", { pid: process.pid, port });
   appendLog("info", "gateway.listen", { address: `127.0.0.1:${port}` });
+});
+
+server.on("error", (error) => {
+  appendLog("error", "gateway.bind_failed", { error: String(error), port });
+  process.exit(1);
 });
 
 function shutdown(signal: string): void {
   appendLog("info", "gateway.stop", { signal, pid: process.pid });
-  server.close(() => {
-    void whatsappRuntime?.disconnect();
+  server.close(async () => {
+    try {
+      if (whatsappRuntime) {
+        await whatsappRuntime.disconnect();
+      }
+    } catch (error) {
+      appendLog("error", "gateway.whatsapp_disconnect_failed", { error: String(error) });
+    }
     try {
       if (fs.existsSync(paths.pid) && fs.readFileSync(paths.pid, "utf8").trim() === String(process.pid)) {
         fs.unlinkSync(paths.pid);
@@ -159,6 +176,10 @@ function shutdown(signal: string): void {
     }
     process.exit(0);
   });
+  setTimeout(() => {
+    appendLog("warn", "gateway.shutdown_timeout", { signal });
+    process.exit(1);
+  }, 10000);
 }
 
 process.on("SIGINT", () => shutdown("SIGINT"));

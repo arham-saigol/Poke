@@ -17,7 +17,7 @@ Backups:
 ```bash
 poke backup create manual
 poke backup list
-poke backup restore ~/.poke/backups/<backup-folder>
+poke backup restore ~/.poke/backups/backup-YYYY-MM-DD
 ```
 
 `poke update` creates a pre-update backup, pulls with `--ff-only`, installs dependencies, runs migrations, and restarts the daemon.

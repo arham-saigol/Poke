@@ -15,7 +15,7 @@
     "poke-doctor": "pnpm --filter @poke/doctor poke-doctor"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
+    "@types/node": "^22.0.0",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
   }

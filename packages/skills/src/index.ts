@@ -25,14 +25,39 @@ export function readSkill(name: string, paths = getPokePaths()): { metadata: Ski
 
 export function setSkillEnabled(name: string, enabled: boolean, paths = getPokePaths()): SkillMetadata {
   seedBundledSkills(paths);
+  
+  // Find the actual skill folder by checking both enabled and disabled directories
   const sourceRoot = enabled ? paths.disabledSkills : paths.enabledSkills;
   const targetRoot = enabled ? paths.enabledSkills : paths.disabledSkills;
-  const source = safeResolve(sourceRoot, name);
-  const target = safeResolve(targetRoot, name);
-  if (!fs.existsSync(source)) throw new Error(`Skill not found in ${enabled ? "disabled" : "enabled"} folder: ${name}`);
+  
+  // Try to find the skill folder
+  let foundPath: string | null = null;
+  let folderName: string | null = null;
+  
+  for (const root of [sourceRoot]) {
+    const candidate = safeResolve(root, name);
+    if (fs.existsSync(candidate) && fs.existsSync(path.join(candidate, "SKILL.md"))) {
+      foundPath = candidate;
+      folderName = path.basename(candidate);
+      break;
+    }
+  }
+  
+  if (!foundPath || !folderName) {
+    throw new Error(`Skill not found in ${enabled ? "disabled" : "enabled"} folder: ${name}`);
+  }
+  
+  // Parse the skill to get the canonical identifier
+  const skillMetadata = parseSkill(foundPath, !enabled);
+  const canonicalName = skillMetadata.name;
+  
+  // Use the canonical name for the target path
+  const source = foundPath;
+  const target = safeResolve(targetRoot, folderName);
+  
   ensureDir(targetRoot);
   fs.renameSync(source, target);
-  audit(enabled ? "skill.enable" : "skill.disable", name);
+  audit(enabled ? "skill.enable" : "skill.disable", canonicalName);
   return parseSkill(target, enabled);
 }
 
@@ -50,8 +75,10 @@ export function deleteSkill(name: string, paths = getPokePaths()): void {
 function ensureSkill(dir: string, content: string): void {
   ensureDir(dir);
   const skillFile = path.join(dir, "SKILL.md");
+  const markerFile = path.join(dir, ".bundled");
   if (!fs.existsSync(skillFile)) {
     fs.writeFileSync(skillFile, content, "utf8");
+    fs.writeFileSync(markerFile, "", "utf8");
   }
 }
 
@@ -59,16 +86,20 @@ function readSkillDir(root: string, enabled: boolean): SkillMetadata[] {
   if (!fs.existsSync(root)) return [];
   return fs.readdirSync(root, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && fs.existsSync(path.join(root, entry.name, "SKILL.md")))
-    .map((entry) => parseSkill(path.join(root, entry.name), enabled));
+    .map((entry) => {
+      const skillPath = path.join(root, entry.name);
+      const isBundled = fs.existsSync(path.join(skillPath, ".bundled"));
+      return parseSkill(skillPath, enabled, isBundled ? "bundled" : "user");
+    });
 }
 
-function parseSkill(dir: string, enabled: boolean): SkillMetadata {
+function parseSkill(dir: string, enabled: boolean, source: "user" | "bundled" = "user"): SkillMetadata {
   const raw = fs.readFileSync(path.join(dir, "SKILL.md"), "utf8");
   const { frontmatter } = parseFrontmatter(raw);
   return {
     name: frontmatter.name ?? path.basename(dir),
     description: frontmatter.description ?? "No description provided.",
-    source: "user",
+    source,
     enabled,
     path: dir
   };

@@ -134,7 +134,6 @@ async function completeWithPi(task: string, reasoning: ReasoningLevel): Promise<
   };
   
   const provider = providerMap[childModelConfig.provider] || "openai";
-  const model = getModel(provider, childModelConfig.model);
   
   // Get API key based on provider
   const apiKey = getSecret("openai-api-key") ?? process.env.OPENAI_API_KEY;
@@ -142,43 +141,36 @@ async function completeWithPi(task: string, reasoning: ReasoningLevel): Promise<
     throw new Error("OpenAI is not configured. Add an OpenAI API key or OAuth integration before running agent tasks.");
   }
   
-  const previous = process.env.OPENAI_API_KEY;
-  if (provider === "openai") {
-    process.env.OPENAI_API_KEY = apiKey;
-  }
+  // Create model with API key to avoid race conditions from mutating process.env
+  const model = getModel(provider, childModelConfig.model, apiKey ? { apiKey } : undefined);
   
-  try {
-    const runtime = createAgentRuntime();
-    const systemPrompt = runtime.childSystemPrompt;
-    
-    // Build tool definitions for the child agent
-    const toolDefinitions = Object.entries(childTools)
-      .filter(([name]) => runtime.childTools.includes(name as ToolName))
-      .map(([name, impl]) => ({
-        name,
-        description: getToolDescription(name as ToolName),
-        parameters: getToolParameters(name as ToolName)
-      }));
-    
-    const response = await completeSimple(model, {
-      messages: [
-        { role: "system", content: systemPrompt, timestamp: Date.now() },
-        { role: "user", content: task, timestamp: Date.now() }
-      ],
-      tools: toolDefinitions.length > 0 ? toolDefinitions : undefined
-    }, {
-      reasoning
-    });
-    
-    return response.content
-      .filter((block: any) => block.type === "text")
-      .map((block: any) => block.text)
-      .join("\n")
-      .trim();
-  } finally {
-    if (previous) process.env.OPENAI_API_KEY = previous;
-    else delete process.env.OPENAI_API_KEY;
-  }
+  const runtime = createAgentRuntime();
+  const systemPrompt = runtime.childSystemPrompt;
+  
+  // Build tool definitions for the child agent
+  const toolDefinitions = Object.entries(childTools)
+    .filter(([name]) => runtime.childTools.includes(name as ToolName))
+    .map(([name, impl]) => ({
+      name,
+      description: getToolDescription(name as ToolName),
+      parameters: getToolParameters(name as ToolName)
+    }));
+  
+  const response = await completeSimple(model, {
+    messages: [
+      { role: "system", content: systemPrompt, timestamp: Date.now() },
+      { role: "user", content: task, timestamp: Date.now() }
+    ],
+    tools: toolDefinitions.length > 0 ? toolDefinitions : undefined
+  }, {
+    reasoning
+  });
+  
+  return response.content
+    .filter((block: any) => block.type === "text")
+    .map((block: any) => block.text)
+    .join("\n")
+    .trim();
 }
 
 function getToolDescription(name: ToolName): string {

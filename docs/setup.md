@@ -13,9 +13,9 @@ Run:
 ```bash
 pnpm install
 pnpm build
-poke setup
-poke-doctor
-poke start
+pnpm poke setup
+pnpm poke-doctor
+pnpm poke start
 ```
 
 For headless Cloudflare login, run `cloudflared tunnel login` on the VPS and open the printed URL on your local machine.

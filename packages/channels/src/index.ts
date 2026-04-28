@@ -10,6 +10,11 @@ export type IncomingMessageInput = {
   from?: string;
 };
 
+export type MessageResult = {
+  session: ActiveSession;
+  responseMessage: ChatMessage | null;
+};
+
 export function getActiveSession(): ActiveSession {
   const paths = bootstrapPokeHome();
   if (!fs.existsSync(paths.session)) {
@@ -45,25 +50,42 @@ export function newSession(): ActiveSession {
   return session;
 }
 
-export async function receiveMessage(input: IncomingMessageInput): Promise<ActiveSession> {
+export async function receiveMessage(input: IncomingMessageInput): Promise<MessageResult> {
   if (input.channel === "whatsapp") {
     assertAllowedWhatsAppSender(input.from);
   }
   if (input.content.trim().startsWith("/")) {
-    return handleSlashCommand(input.content.trim(), input.channel);
+    const session = handleSlashCommand(input.content.trim(), input.channel);
+    const responseMessage = session.messages[session.messages.length - 1] ?? null;
+    return { session, responseMessage };
   }
   const session = getActiveSession();
   session.status = "running";
   session.messages.push(message("user", input.channel, input.content, input.mediaPath, session.id));
-  const loadRuntime = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<any>;
-  const { parentTools } = await loadRuntime("@poke/agent-runtime");
-  const child = await parentTools.ask_poke({ task: input.content, reasoning: session.reasoning });
-  session.messages.push(message("assistant", input.channel, child.output, undefined, session.id));
-  session.status = "idle";
   session.updatedAt = new Date().toISOString();
+  
+  // Persist session immediately after adding user message and setting status
   writeSession(session);
-  appendLog("info", "channel.message.processed", { channel: input.channel, sessionId: session.id });
-  return session;
+  
+  try {
+    const loadRuntime = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<any>;
+    const { parentTools } = await loadRuntime("@poke/agent-runtime");
+    const child = await parentTools.ask_poke({ task: input.content, reasoning: session.reasoning });
+    const responseMessage = message("assistant", input.channel, child.output, undefined, session.id);
+    session.messages.push(responseMessage);
+    session.status = "idle";
+    session.updatedAt = new Date().toISOString();
+    writeSession(session);
+    appendLog("info", "channel.message.processed", { channel: input.channel, sessionId: session.id });
+    return { session, responseMessage };
+  } catch (error) {
+    // Update session status on error and persist
+    session.status = "idle";
+    session.updatedAt = new Date().toISOString();
+    session.messages.push(message("system", "system", `Error processing message: ${String(error)}`, undefined, session.id));
+    writeSession(session);
+    throw error;
+  }
 }
 
 export function handleSlashCommand(command: string, channel: Channel): ActiveSession {
@@ -116,9 +138,17 @@ export function getWhatsAppStatus(): {
 function assertAllowedWhatsAppSender(from?: string): void {
   const config = readConfig();
   const allowed = config.channels.whatsapp.allowedNumber;
-  if (allowed && from && normalizePhone(from) !== normalizePhone(allowed)) {
-    audit("whatsapp.message.rejected", from);
-    throw new Error("WhatsApp sender is not allowed.");
+  
+  // If an allowlist is configured, reject messages without a sender or from non-allowed senders
+  if (allowed) {
+    if (!from) {
+      audit("whatsapp.message.rejected", "unknown");
+      throw new Error("WhatsApp sender is not allowed.");
+    }
+    if (normalizePhone(from) !== normalizePhone(allowed)) {
+      audit("whatsapp.message.rejected", from);
+      throw new Error("WhatsApp sender is not allowed.");
+    }
   }
 }
 

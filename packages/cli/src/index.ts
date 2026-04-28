@@ -112,8 +112,15 @@ program
     }
     try {
       process.kill(pid, "SIGTERM");
-      fs.rmSync(paths.pid, { force: true });
       console.log(`Sent SIGTERM to Poke daemon pid ${pid}.`);
+      
+      // Remove PID file after successful kill
+      try {
+        fs.rmSync(paths.pid, { force: true });
+      } catch (unlinkError) {
+        console.error(`Warning: Failed to remove PID file: ${String(unlinkError)}`);
+        process.exitCode = 1;
+      }
     } catch (error) {
       console.error(`Failed to stop pid ${pid}: ${String(error)}`);
       process.exitCode = 1;
@@ -129,6 +136,36 @@ program
     if (pid) {
       try {
         process.kill(pid, "SIGTERM");
+        
+        // Wait for the process to actually exit
+        const maxWaitMs = 5000;
+        const startTime = Date.now();
+        let processExited = false;
+        
+        while (Date.now() - startTime < maxWaitMs) {
+          if (!processExists(pid)) {
+            processExited = true;
+            break;
+          }
+          // Sleep for 100ms before checking again
+          const sleepMs = 100;
+          const sleepEnd = Date.now() + sleepMs;
+          while (Date.now() < sleepEnd) {
+            // Busy wait
+          }
+        }
+        
+        if (!processExited) {
+          // Process didn't exit gracefully, try SIGKILL
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {
+            // Process might have exited between checks
+          }
+        }
+        
+        // Clean up PID file
+        fs.rmSync(paths.pid, { force: true });
       } catch {
         fs.rmSync(paths.pid, { force: true });
       }
@@ -172,9 +209,12 @@ program
       process.stdout.write(fs.readFileSync(logFile, "utf8"));
       return;
     }
-    const child = spawn(process.platform === "win32" ? "powershell" : "tail", process.platform === "win32" ? ["-NoProfile", "-Command", `Get-Content -Wait -Path '${logFile.replaceAll("'", "''")}'`] : ["-f", logFile], {
-      stdio: "inherit"
-    });
+    
+    // Use safe argument passing to avoid injection
+    const child = process.platform === "win32" 
+      ? spawn("powershell", ["-NoProfile", "-Command", "Get-Content", "-Wait", "-LiteralPath", logFile], { stdio: "inherit" })
+      : spawn("tail", ["-f", logFile], { stdio: "inherit" });
+    
     child.on("exit", (code) => {
       process.exitCode = code ?? 0;
     });
@@ -226,15 +266,41 @@ program
   .description("Update Poke without resetting user state")
   .action(() => {
     bootstrapPokeHome();
+    
+    // Resolve workspace root
+    const workspaceRoot = findWorkspaceRoot();
+    
+    // Verify it's a git repo
+    const gitCheck = spawnSync("git", ["rev-parse", "--git-dir"], { cwd: workspaceRoot, stdio: "pipe" });
+    if (gitCheck.status !== 0) {
+      console.error("Not a git repository. Cannot update.");
+      process.exitCode = 1;
+      return;
+    }
+    
+    // Check for uncommitted changes
+    const statusCheck = spawnSync("git", ["status", "--porcelain"], { cwd: workspaceRoot, stdio: "pipe", encoding: "utf8" });
+    if (statusCheck.status !== 0) {
+      console.error("Failed to check git status.");
+      process.exitCode = 1;
+      return;
+    }
+    if (statusCheck.stdout && statusCheck.stdout.trim().length > 0) {
+      console.error("Repository has uncommitted changes. Commit or stash changes before updating.");
+      process.exitCode = 1;
+      return;
+    }
+    
     const backup = createBackup("pre-update");
     console.log(`Created pre-update backup at ${backup}`);
-    const git = spawnSync("git", ["pull", "--ff-only"], { stdio: "inherit" });
+    
+    const git = spawnSync("git", ["pull", "--ff-only"], { cwd: workspaceRoot, stdio: "inherit" });
     if (git.status !== 0) {
       console.error("git pull failed; user state backup was preserved.");
       process.exitCode = git.status ?? 1;
       return;
     }
-    const install = spawnSync("pnpm", ["install"], { stdio: "inherit" });
+    const install = spawnSync("pnpm", ["install"], { cwd: workspaceRoot, stdio: "inherit" });
     if (install.status !== 0) {
       process.exitCode = install.status ?? 1;
       return;

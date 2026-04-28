@@ -240,6 +240,7 @@ function SettingsPage() {
     setSettings(await api("/api/settings", {
       method: "POST",
       body: JSON.stringify({
+        name,
         allowedWhatsAppNumber,
         whatsappEnabled,
         exaApiKey: keys.exaApiKey,

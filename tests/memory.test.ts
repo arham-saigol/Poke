@@ -8,10 +8,17 @@ function tempHome(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "poke-memory-"));
 }
 
-test("memory writes rebuild the index and delete removes entries", async () => {
+test("memory writes rebuild the index and delete removes entries", async (t) => {
   const storage = await import("../packages/storage/src/index.ts");
   const memory = await import("../packages/memory/src/index.ts");
   const home = tempHome();
+  const originalPokeHome = process.env.POKE_HOME;
+  
+  t.after(() => {
+    process.env.POKE_HOME = originalPokeHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+  
   process.env.POKE_HOME = home;
   const paths = storage.bootstrapPokeHome({ home });
   memory.writeMemory({ path: "preferences/tone.md", title: "Tone", content: "Concise." }, paths);

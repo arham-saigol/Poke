@@ -19,6 +19,14 @@ export async function POST(request: Request): Promise<Response> {
 export async function PUT(request: Request): Promise<Response> {
   const body = await request.json() as any;
   const paths = getPokePaths();
+  if (typeof body.content === "string") {
+    try {
+      fs.writeFileSync(paths.automations, body.content, "utf8");
+      return Response.json({ content: body.content });
+    } catch (error) {
+      return Response.json({ error: String(error) }, { status: 500 });
+    }
+  }
   const raw = fs.readFileSync(paths.automations, "utf8");
-  return Response.json({ content: body.content ?? raw });
+  return Response.json({ content: raw });
 }

@@ -2,7 +2,7 @@
 
 The channel layer exposes `receiveMessage({ channel: "whatsapp", ... })` and rejects senders that do not match the configured allowed number.
 
-The Baileys adapter wiring pass should:
+The Baileys adapter wiring path should:
 
 - Store Baileys auth under `~/.poke/whatsapp`.
 - Normalize incoming WhatsApp messages into `receiveMessage`.
