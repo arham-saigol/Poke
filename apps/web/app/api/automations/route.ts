@@ -32,17 +32,17 @@ export async function PUT(request: Request): Promise<Response> {
   const authError = checkAuth(request);
   if (authError) return authError;
 
-  const body = await request.json() as any;
-  const paths = getPokePaths();
-  if (typeof body.content === "string") {
-    try {
+  try {
+    const body = await request.json() as any;
+    const paths = getPokePaths();
+    if (typeof body.content === "string") {
       validateAutomations(JSON.parse(body.content));
       fs.writeFileSync(paths.automations, body.content, "utf8");
       return Response.json({ content: body.content });
-    } catch (error) {
-      return Response.json({ error: String(error) }, { status: 400 });
     }
+    const raw = fs.readFileSync(paths.automations, "utf8");
+    return Response.json({ content: raw });
+  } catch (error) {
+    return Response.json({ error: String(error) }, { status: 400 });
   }
-  const raw = fs.readFileSync(paths.automations, "utf8");
-  return Response.json({ content: raw });
 }

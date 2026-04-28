@@ -72,6 +72,11 @@ async function runCommand(automation: Automation): Promise<{ status: "completed"
       cwd: action.cwd,
       detached: process.platform !== "win32"
     });
+    // Detach the child from the parent's reference count so the parent can exit
+    // without waiting on the child; we still track child.pid for terminateChild.
+    if (process.platform !== "win32") {
+      child.unref();
+    }
     const timeoutMs = (action.timeoutSeconds ?? 300) * 1000;
     const timeout = setTimeout(() => {
       if (settled) return;
@@ -151,6 +156,7 @@ function terminateChild(pid: number | undefined): void {
 
 type CronField = {
   values: Set<number>;
+  isWildcard: boolean;
 };
 
 function computeNextCronOccurrence(expression: string, timeZone: string, reference: Date): Date | null {
@@ -171,12 +177,21 @@ function computeNextCronOccurrence(expression: string, timeZone: string, referen
 
   for (let index = 0; index < 366 * 24 * 60; index += 1) {
     const parts = zonedDateParts(cursor, timeZone);
+    // Per POSIX cron, dayOfMonth and dayOfWeek combine with OR semantics when
+    // either is restricted (non-wildcard). When both are wildcards, every day matches.
+    const dayOfMonthMatches = fields.dayOfMonth.values.has(parts.dayOfMonth);
+    const dayOfWeekMatches = fields.dayOfWeek.values.has(parts.dayOfWeek);
+    const dayMatches = (fields.dayOfMonth.isWildcard && fields.dayOfWeek.isWildcard)
+      ? (dayOfMonthMatches && dayOfWeekMatches)
+      : (
+        (fields.dayOfMonth.isWildcard ? false : dayOfMonthMatches)
+        || (fields.dayOfWeek.isWildcard ? false : dayOfWeekMatches)
+      );
     if (
       fields.minute.values.has(parts.minute)
       && fields.hour.values.has(parts.hour)
-      && fields.dayOfMonth.values.has(parts.dayOfMonth)
       && fields.month.values.has(parts.month)
-      && fields.dayOfWeek.values.has(parts.dayOfWeek)
+      && dayMatches
     ) {
       return new Date(cursor);
     }
@@ -187,6 +202,12 @@ function computeNextCronOccurrence(expression: string, timeZone: string, referen
 
 function parseCronField(field: string, min: number, max: number, mapSunday = false): CronField {
   const values = new Set<number>();
+  // A field is a wildcard if every segment is "*" or "*/step" — i.e. it imposes no
+  // restriction beyond the natural range.
+  const isWildcard = field.split(",").every((segment) => {
+    const [base] = segment.split("/");
+    return base === "*";
+  });
   for (const segment of field.split(",")) {
     const [base, stepPart] = segment.split("/");
     const step = stepPart ? Number(stepPart) : 1;
@@ -198,7 +219,7 @@ function parseCronField(field: string, min: number, max: number, mapSunday = fal
       values.add(mapCronValue(value, mapSunday));
     }
   }
-  return { values };
+  return { values, isWildcard };
 }
 
 function parseCronRange(field: string, min: number, max: number, mapSunday: boolean): [number, number] {

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import {
+  BarChart3,
   Bot,
   CalendarClock,
   Check,
@@ -16,8 +17,10 @@ import {
   Github,
   HardDrive,
   KeyRound,
+  Mail,
   MemoryStick,
   Moon,
+  NotebookText,
   Plug,
   RefreshCw,
   Save,
@@ -29,6 +32,17 @@ import {
   UserCircle,
   Wrench
 } from "lucide-react";
+
+const connectorIcons: Record<string, React.ComponentType<{ size?: number }>> = {
+  github: Github,
+  notion: NotebookText,
+  posthog: BarChart3,
+  agentmail: Mail
+};
+
+function getConnectorIcon(name: string): React.ComponentType<{ size?: number }> {
+  return connectorIcons[name] ?? Plug;
+}
 
 type Section = "chat" | "workspace" | "customize" | "automations" | "memory" | "settings";
 type FileNode = { name: string; path: string; type: "file" | "directory"; children?: FileNode[] };
@@ -69,13 +83,26 @@ function NavButton({ active, icon, label, onClick }: { active: boolean; icon: Re
 function Chat() {
   const [session, setSession] = useState<Session | null>(null);
   const [content, setContent] = useState("");
-  const refresh = async () => setSession(await api("/api/session"));
+  const [error, setError] = useState<string | null>(null);
+  async function refresh() {
+    setError(null);
+    try {
+      setSession(await api("/api/session"));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load session");
+    }
+  }
   useEffect(() => { void refresh(); }, []);
   async function send() {
     const text = content.trim();
     if (!text) return;
     setContent("");
-    setSession(await api("/api/session", { method: "POST", body: JSON.stringify({ content: text }) }));
+    setError(null);
+    try {
+      setSession(await api("/api/session", { method: "POST", body: JSON.stringify({ content: text }) }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to send message");
+    }
   }
   return (
     <div className="pane">
@@ -83,6 +110,7 @@ function Chat() {
         <div><h1>Chat</h1><p>Session {session?.id.slice(0, 8) ?? "loading"} · {session?.status ?? "idle"} · {session?.reasoning ?? "low"}</p></div>
         <button className="iconButton" onClick={refresh} title="Refresh" aria-label="Refresh conversations"><RefreshCw size={18} /></button>
       </header>
+      {error ? <p className="inlineError">{error}</p> : null}
       <div className="messages">
         {session?.messages.map((message) => (
           <div key={message.id} className={`message ${message.role}`}>
@@ -148,7 +176,10 @@ function FileManager({ root, title }: { root: string; title: string }) {
             <button className="iconButton" onClick={refresh} title="Refresh" aria-label="Refresh files"><RefreshCw size={18} /></button>
             <button className="iconButton" onClick={save} disabled={!selected} title="Save" aria-label="Save file"><Save size={18} /></button>
             <button className="iconButton" onClick={remove} disabled={!selected} title="Delete" aria-label="Delete file"><Trash2 size={18} /></button>
-            <a className="iconButton" href={`${endpoint}&path=${encodeURIComponent(selected)}&download=1`} title="Download" aria-label="Download file"><Download size={18} /></a>
+            {selected
+              ? <a className="iconButton" href={`${endpoint}&path=${encodeURIComponent(selected)}&download=1`} title="Download" aria-label="Download file"><Download size={18} /></a>
+              : <button className="iconButton" type="button" disabled aria-disabled="true" title="Download (select a file)" aria-label="Download (no file selected)"><Download size={18} /></button>
+            }
           </div>
         </div>
         <textarea value={content} onChange={(event) => setContent((event.currentTarget as HTMLTextAreaElement).value)} placeholder="Select a file" />
@@ -183,14 +214,17 @@ function Connectors() {
   async function refresh() { setItems((await api("/api/connectors")).connectors); }
   useEffect(() => { void refresh(); }, []);
   return <section className="pane"><header className="toolbar"><div><h1>Connectors</h1><p>Progressive tools for the child agent</p></div></header>
-    <div className="grid">{items.map((item) => <article className="card" key={item.name}>
-      <div className="cardTitle"><Github size={18} />{item.displayName}</div>
+    <div className="grid">{items.map((item) => {
+      const Icon = getConnectorIcon(item.name);
+      return <article className="card" key={item.name}>
+      <div className="cardTitle"><Icon size={18} />{item.displayName}</div>
       <p>{item.authType === "oauth" ? "OAuth connector" : "API key connector"} · {item.status}</p>
       <input value={credentials[item.name] ?? ""} onChange={(event) => setCredentials({ ...credentials, [item.name]: (event.currentTarget as HTMLInputElement).value })} placeholder={item.authType === "oauth" ? "OAuth token placeholder" : "API key"} />
       <button className="primary" onClick={async () => { await api("/api/connectors", { method: "POST", body: JSON.stringify({ name: item.name, enabled: !item.enabled, credential: credentials[item.name] }) }); await refresh(); }}>
         <Check size={16} />{item.enabled ? "Disable" : "Enable"}
       </button>
-    </article>)}</div>
+    </article>;
+    })}</div>
   </section>;
 }
 
@@ -251,18 +285,20 @@ function SettingsPage() {
     setWhatsappEnabled(Boolean(settings.config?.channels?.whatsapp?.enabled));
   }, [settings]);
   async function save() {
+    const payload: Record<string, unknown> = {
+      name,
+      allowedWhatsAppNumber,
+      whatsappEnabled
+    };
+    for (const key of secretKeys) {
+      const value = keys[key];
+      if (typeof value === "string" && value.length > 0) {
+        payload[key] = value;
+      }
+    }
     setSettings(await api("/api/settings", {
       method: "POST",
-      body: JSON.stringify({
-        name,
-        allowedWhatsAppNumber,
-        whatsappEnabled,
-        exaApiKey: keys.exaApiKey,
-        exaBackupApiKey: keys.exaBackupApiKey,
-        vercelAiGatewayApiKey: keys.vercelAiGatewayApiKey,
-        deepgramApiKey: keys.deepgramApiKey,
-        openaiApiKey: keys.openaiApiKey
-      })
+      body: JSON.stringify(payload)
     }));
   }
   return <section className="pane"><header className="toolbar"><div><h1>Settings</h1><p>Identity, providers, WhatsApp, and pipeline models</p></div><Settings /></header>

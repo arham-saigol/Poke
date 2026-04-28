@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import dns from "node:dns/promises";
 import fs from "node:fs";
+import https from "node:https";
 import net from "node:net";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -154,23 +155,68 @@ async function completeWithPi(task: string, reasoning: ReasoningLevel, signal?: 
       parameters: getToolParameters(name as ToolName)
     }));
   
-  const response = await completeSimple(model as Parameters<typeof completeSimple>[0], {
-    systemPrompt,
-    messages: [
-      { role: "user", content: task, timestamp: Date.now() }
-    ],
-    tools: toolDefinitions.length > 0 ? toolDefinitions : undefined
-  }, {
-    reasoning,
-    signal,
-    apiKey
-  });
-  
-  return response.content
-    .filter((block: any) => block.type === "text")
-    .map((block: any) => block.text)
-    .join("\n")
-    .trim();
+  const messages: any[] = [
+    { role: "user", content: task, timestamp: Date.now() }
+  ];
+
+  const collectedText: string[] = [];
+  // Cap iterations so a malfunctioning model can't loop forever.
+  const maxIterations = 16;
+  for (let iteration = 0; iteration < maxIterations; iteration += 1) {
+    const response: any = await completeSimple(model as Parameters<typeof completeSimple>[0], {
+      systemPrompt,
+      messages,
+      tools: toolDefinitions.length > 0 ? toolDefinitions : undefined
+    }, {
+      reasoning,
+      signal,
+      apiKey
+    });
+
+    const blocks: any[] = Array.isArray(response.content) ? response.content : [];
+
+    for (const block of blocks) {
+      if (block?.type === "text" && typeof block.text === "string") {
+        collectedText.push(block.text);
+      }
+    }
+
+    const toolCalls = blocks.filter((block) => block?.type === "toolCall");
+    if (toolCalls.length === 0) {
+      break;
+    }
+
+    // Append the assistant message so the model sees its prior tool calls.
+    messages.push(response);
+
+    for (const call of toolCalls) {
+      const impl = (childTools as Record<string, ((input: any) => unknown) | undefined>)[call.name];
+      let resultText: string;
+      let isError = false;
+      if (!impl || !runtime.childTools.includes(call.name as ToolName)) {
+        resultText = `Tool not available: ${call.name}`;
+        isError = true;
+      } else {
+        try {
+          const value = await impl(call.arguments ?? {});
+          resultText = typeof value === "string" ? value : JSON.stringify(value);
+        } catch (error) {
+          resultText = error instanceof Error ? error.message : String(error);
+          isError = true;
+        }
+      }
+      messages.push({
+        role: "toolResult",
+        toolCallId: call.id,
+        toolName: call.name,
+        content: [{ type: "text", text: resultText }],
+        isError,
+        timestamp: Date.now()
+      });
+    }
+  }
+
+  return collectedText.join("\n").trim();
 }
 
 function getToolDescription(name: ToolName): string {
@@ -301,10 +347,44 @@ async function exaSearch(query: string, numResults: number): Promise<any> {
 }
 
 async function webFetch(url: string): Promise<{ url: string; content: string }> {
-  const parsedUrl = await validatePublicHttpsUrl(url);
-  const response = await fetch(parsedUrl.toString(), { headers: { "user-agent": "Poke/0.1" } });
-  if (!response.ok) throw new Error(`Fetch failed: ${response.status}`);
-  return { url: parsedUrl.toString(), content: await response.text() };
+  const { url: parsedUrl, resolvedAddress, family } = await validatePublicHttpsUrl(url);
+  return await new Promise<{ url: string; content: string }>((resolve, reject) => {
+    const port = parsedUrl.port ? Number(parsedUrl.port) : 443;
+    const request = https.request(
+      {
+        host: parsedUrl.hostname,
+        port,
+        path: `${parsedUrl.pathname}${parsedUrl.search}`,
+        method: "GET",
+        headers: {
+          "user-agent": "Poke/0.1",
+          host: parsedUrl.host
+        },
+        servername: parsedUrl.hostname,
+        // Pin the resolved IP so DNS rebinding between validation and connect cannot
+        // redirect the request to a private/reserved address.
+        lookup: (_hostname, _options, callback) => {
+          callback(null, resolvedAddress, family);
+        }
+      },
+      (response) => {
+        const status = response.statusCode ?? 0;
+        if (status < 200 || status >= 300) {
+          response.resume();
+          reject(new Error(`Fetch failed: ${status}`));
+          return;
+        }
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("end", () => {
+          resolve({ url: parsedUrl.toString(), content: Buffer.concat(chunks).toString("utf8") });
+        });
+        response.on("error", reject);
+      }
+    );
+    request.on("error", reject);
+    request.end();
+  });
 }
 
 async function transcribeAudio(url: string, keepFile: boolean): Promise<{ transcript: string; mediaPath?: string }> {
@@ -423,7 +503,7 @@ function mimeTypeForImage(file: string): string {
   return mime;
 }
 
-async function validatePublicHttpsUrl(rawUrl: string): Promise<URL> {
+async function validatePublicHttpsUrl(rawUrl: string): Promise<{ url: URL; resolvedAddress: string; family: number }> {
   const parsed = new URL(validateHttpUrl(rawUrl, "web_fetch"));
   if (parsed.protocol !== "https:") {
     throw new Error("web_fetch only allows https URLs.");
@@ -445,7 +525,10 @@ async function validatePublicHttpsUrl(rawUrl: string): Promise<URL> {
   if (blockedAddress) {
     throw new Error(`web_fetch blocked private or reserved address ${blockedAddress.address} for ${hostname}`);
   }
-  return parsed;
+  // Pin the first validated address so the subsequent fetch cannot be redirected to
+  // a different (potentially private) IP via DNS rebinding between validation and connect.
+  const pinned = resolvedAddresses[0]!;
+  return { url: parsed, resolvedAddress: pinned.address, family: pinned.family };
 }
 
 function validateHttpUrl(rawUrl: string, toolName: string): string {
@@ -547,10 +630,61 @@ function validateCommandArguments(executable: string, args: string[]): void {
     case "python3":
       validatePythonCommand(args);
       return;
+    case "sed":
+      validateSedCommand(args);
+      return;
+    case "find":
+      validateFindCommand(args);
+      return;
+    case "cat":
+      validateCatCommand(args);
+      return;
     case "pytest":
       return;
     default:
       return;
+  }
+}
+
+function validateSedCommand(args: string[]): void {
+  for (const arg of args) {
+    if (arg === "--in-place" || arg.startsWith("--in-place=")) {
+      throw new Error("sed in-place edit flags are not permitted.");
+    }
+    // Short-style: -i, -i.bak, or combined short flags containing i (e.g. -ni, -ie)
+    if (/^-[a-zA-Z]*i/.test(arg)) {
+      throw new Error("sed in-place edit flags are not permitted.");
+    }
+  }
+}
+
+function validateFindCommand(args: string[]): void {
+  const forbiddenActions = new Set([
+    "-exec",
+    "-execdir",
+    "-ok",
+    "-okdir",
+    "-delete",
+    "-fprint",
+    "-fprintf",
+    "-fls"
+  ]);
+  for (const arg of args) {
+    if (forbiddenActions.has(arg)) {
+      throw new Error(`find action is not permitted: ${arg}`);
+    }
+  }
+}
+
+function validateCatCommand(args: string[]): void {
+  for (const arg of args) {
+    if (arg.startsWith("-")) continue;
+    if (/^\/dev(\/|$)/i.test(arg) || /^\/proc(\/|$)/i.test(arg) || /^\/sys(\/|$)/i.test(arg)) {
+      throw new Error(`cat target is not permitted: ${arg}`);
+    }
+    if (isUnsafePathToken(arg)) {
+      throw new Error(`cat target is not permitted: ${arg}`);
+    }
   }
 }
 

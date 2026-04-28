@@ -177,8 +177,25 @@ program
         fs.rmSync(paths.pid, { force: true });
       }
     }
-    const result = spawnSync(process.execPath, [process.argv[1]!, "start"], { stdio: "inherit" });
-    process.exitCode = result.status ?? 0;
+    // The OS may need a moment to release listening ports / file locks held by the
+    // previous daemon. Retry the start with a short backoff before giving up so a
+    // transient race does not turn into a failed restart.
+    const maxAttempts = 5;
+    let backoffMs = 200;
+    let lastStatus: number | null = 0;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const result = spawnSync(process.execPath, [process.argv[1]!, "start"], { stdio: "inherit" });
+      lastStatus = result.status;
+      if (result.status === 0) {
+        process.exitCode = 0;
+        return;
+      }
+      if (attempt < maxAttempts) {
+        await sleepMs(backoffMs);
+        backoffMs *= 2;
+      }
+    }
+    process.exitCode = lastStatus ?? 1;
   });
 
 program
@@ -384,8 +401,9 @@ function sleepMs(duration: number): Promise<void> {
 }
 
 function commandExists(command: string): boolean {
-  const checker = process.platform === "win32" ? "where" : "command";
-  const args = process.platform === "win32" ? [command] : ["-v", command];
-  const result = spawnSync(checker, args, { stdio: "ignore", shell: process.platform !== "win32" });
+  // Use external binaries (where/which) directly so we never enable shell mode,
+  // which would let untrusted command names interpolate as shell tokens.
+  const checker = process.platform === "win32" ? "where" : "which";
+  const result = spawnSync(checker, [command], { stdio: "ignore", shell: false });
   return result.status === 0;
 }

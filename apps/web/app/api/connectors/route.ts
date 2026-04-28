@@ -50,9 +50,16 @@ function isConnectorInputError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
   }
-  return (
-    error.message.includes("credential is required")
-    || error.message.includes("credentials are missing")
-    || error.message.includes("invalid")
-  );
+  const message = error.message.toLowerCase();
+  const clientPhrases = [
+    "credential is required",
+    "credentials are missing",
+    "invalid credential",
+    "invalid credentials",
+    "invalid api key",
+    "invalid token",
+    "invalid oauth token",
+    "invalid authorization"
+  ];
+  return clientPhrases.some((phrase) => message.includes(phrase));
 }

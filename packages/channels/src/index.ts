@@ -124,6 +124,13 @@ export async function handleSlashCommand(command: string, channel: Channel): Pro
       return;
     }
     if (name === "/restart") {
+      // TODO: Implement an actual daemon restart hand-off here. The /restart slash command
+      // is intentional scaffolding: it records the user's intent (system message + audit
+      // event) but does not signal the gateway/daemon to relaunch. Wiring this up requires
+      // an out-of-band channel to the supervisor (e.g. a restart helper that runs
+      // abortRunningRequests, persists state, and invokes `poke restart` or sends SIGTERM
+      // to the gateway PID). Until that exists, the user is directed to run `poke restart`
+      // on the host.
       current.messages.push(message("system", "system", "Daemon restart requested. Use `poke restart` on the host to perform the restart in this scaffold.", undefined, current.id));
       audit("daemon.restart.requested", current.id, { channel });
       return;
