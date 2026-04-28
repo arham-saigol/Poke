@@ -81,24 +81,43 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.url === "/message" && request.method === "POST") {
+      let body: Record<string, any>;
       try {
-        const body = await readJsonBody(request);
-        const result = await receiveMessage({ channel: "web", content: String(body.content ?? ""), mediaPath: body.mediaPath });
-        sendJson(response, result.session);
+        body = await readJsonBody(request);
+        if (body.mediaPath !== undefined && typeof body.mediaPath !== "string") {
+          throw new Error("mediaPath must be a string");
+        }
+        if (body.content !== undefined && typeof body.content !== "string") {
+          throw new Error("content must be a string");
+        }
       } catch (error) {
-        sendJson(response, { error: String(error) }, 400);
+        sendJson(response, { error: error instanceof Error ? error.message : String(error) }, 400);
+        return;
       }
+      const result = await receiveMessage({ channel: "web", content: String(body.content ?? ""), mediaPath: body.mediaPath });
+      sendJson(response, result.session);
       return;
     }
 
     if (request.url === "/whatsapp/inbound" && request.method === "POST") {
+      let body: Record<string, any>;
       try {
-        const body = await readJsonBody(request);
-        const result = await receiveMessage({ channel: "whatsapp", content: String(body.content ?? ""), mediaPath: body.mediaPath, from: body.from });
-        sendJson(response, result.session);
+        body = await readJsonBody(request);
+        if (body.mediaPath !== undefined && typeof body.mediaPath !== "string") {
+          throw new Error("mediaPath must be a string");
+        }
+        if (body.from !== undefined && typeof body.from !== "string") {
+          throw new Error("from must be a string");
+        }
+        if (body.content !== undefined && typeof body.content !== "string") {
+          throw new Error("content must be a string");
+        }
       } catch (error) {
-        sendJson(response, { error: String(error) }, 403);
+        sendJson(response, { error: error instanceof Error ? error.message : String(error) }, 403);
+        return;
       }
+      const result = await receiveMessage({ channel: "whatsapp", content: String(body.content ?? ""), mediaPath: body.mediaPath, from: body.from });
+      sendJson(response, result.session);
       return;
     }
 

@@ -15,20 +15,44 @@ export async function POST(request: Request): Promise<Response> {
   const authError = checkAuth(request);
   if (authError) return authError;
 
-  const body = await request.json() as any;
-  const name = connectorNameSchema.parse(body.name);
-  let state = getConnectorState(name);
-  const requestedEnabled = typeof body.enabled === "boolean" ? body.enabled : state.enabled;
-  
-  if (typeof body.credential === "string" && body.credential.trim()) {
-    state = connectConnector(name, body.credential.trim());
-    if (!requestedEnabled) {
-      state = setConnectorEnabled(name, false);
+  try {
+    const body = await request.json() as any;
+    const name = connectorNameSchema.parse(body.name);
+    let state = getConnectorState(name);
+    const requestedEnabled = typeof body.enabled === "boolean" ? body.enabled : state.enabled;
+    
+    if (typeof body.credential === "string" && body.credential.trim()) {
+      state = connectConnector(name, body.credential.trim());
+      if (!requestedEnabled) {
+        state = setConnectorEnabled(name, false);
+      }
+    } else if (requestedEnabled && state.status === "available") {
+      return Response.json({ error: "credential is required before enabling this connector" }, { status: 400 });
+    } else {
+      state = setConnectorEnabled(name, requestedEnabled);
     }
-  } else if (requestedEnabled && state.status === "available") {
-    return Response.json({ error: "credential is required before enabling this connector" }, { status: 400 });
-  } else {
-    state = setConnectorEnabled(name, requestedEnabled);
+    return Response.json({ connector: state });
+  } catch (error) {
+    if (isConnectorInputError(error)) {
+      return Response.json({ error: error instanceof Error ? error.message : "invalid input" }, { status: 400 });
+    }
+    throw error;
   }
-  return Response.json({ connector: state });
+}
+
+function isConnectorInputError(error: unknown): boolean {
+  if (error instanceof SyntaxError) {
+    return true;
+  }
+  if (error instanceof Error && error.name === "ZodError") {
+    return true;
+  }
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return (
+    error.message.includes("credential is required")
+    || error.message.includes("credentials are missing")
+    || error.message.includes("invalid")
+  );
 }

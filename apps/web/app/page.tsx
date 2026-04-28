@@ -81,7 +81,7 @@ function Chat() {
     <div className="pane">
       <header className="toolbar">
         <div><h1>Chat</h1><p>Session {session?.id.slice(0, 8) ?? "loading"} · {session?.status ?? "idle"} · {session?.reasoning ?? "low"}</p></div>
-        <button className="iconButton" onClick={refresh} title="Refresh"><RefreshCw size={18} /></button>
+        <button className="iconButton" onClick={refresh} title="Refresh" aria-label="Refresh conversations"><RefreshCw size={18} /></button>
       </header>
       <div className="messages">
         {session?.messages.map((message) => (
@@ -138,17 +138,17 @@ function FileManager({ root, title }: { root: string; title: string }) {
         <FileTree nodes={tree} onOpen={open} />
         <div className="inlineForm">
           <input value={newPath} onChange={(event) => setNewPath((event.currentTarget as HTMLInputElement).value)} placeholder="folder/file.md" />
-          <button className="iconButton" onClick={createFile} title="Create file"><FilePlus size={18} /></button>
+          <button className="iconButton" onClick={createFile} title="Create file" aria-label="Create file"><FilePlus size={18} /></button>
         </div>
       </aside>
       <section className="editor">
         <div className="toolbar">
           <div><h1>{selected || title}</h1><p>{root}</p></div>
           <div className="actions">
-            <button className="iconButton" onClick={refresh} title="Refresh"><RefreshCw size={18} /></button>
-            <button className="iconButton" onClick={save} disabled={!selected} title="Save"><Save size={18} /></button>
-            <button className="iconButton" onClick={remove} disabled={!selected} title="Delete"><Trash2 size={18} /></button>
-            <a className="iconButton" href={`${endpoint}&path=${encodeURIComponent(selected)}&download=1`} title="Download"><Download size={18} /></a>
+            <button className="iconButton" onClick={refresh} title="Refresh" aria-label="Refresh files"><RefreshCw size={18} /></button>
+            <button className="iconButton" onClick={save} disabled={!selected} title="Save" aria-label="Save file"><Save size={18} /></button>
+            <button className="iconButton" onClick={remove} disabled={!selected} title="Delete" aria-label="Delete file"><Trash2 size={18} /></button>
+            <a className="iconButton" href={`${endpoint}&path=${encodeURIComponent(selected)}&download=1`} title="Download" aria-label="Download file"><Download size={18} /></a>
           </div>
         </div>
         <textarea value={content} onChange={(event) => setContent((event.currentTarget as HTMLTextAreaElement).value)} placeholder="Select a file" />
@@ -224,7 +224,7 @@ function Automations() {
         <code>{item.schedule.type}: {item.schedule.value}</code>
       </article>)}</div>
       <section className="editor compactEditor">
-        <div className="toolbar"><div><h2>automations.json</h2><p>Validated before save</p></div><button className="iconButton" onClick={save} title="Save"><Save size={18} /></button></div>
+        <div className="toolbar"><div><h2>automations.json</h2><p>Validated before save</p></div><button className="iconButton" onClick={save} title="Save" aria-label="Save automations"><Save size={18} /></button></div>
         {jsonError ? <p className="inlineError">{jsonError}</p> : null}
         <textarea value={raw} onChange={(event) => setRaw((event.currentTarget as HTMLTextAreaElement).value)} />
       </section>
@@ -281,6 +281,7 @@ function SettingsPage() {
             type="button"
             onClick={() => setRevealMap({ ...revealMap, [key]: !revealMap[key] })}
             title={revealMap[key] ? `Hide ${key}` : `Reveal ${key}`}
+            aria-label={revealMap[key] ? `Hide ${key}` : `Reveal ${key}`}
           >
             {revealMap[key] ? <EyeOff size={18} /> : <Eye size={18} />}
           </button>

@@ -147,3 +147,9 @@ export declare const childTools: {
         instructions: string;
     };
 };
+export declare function assertAllowedCommand(command: string): void;
+export declare function parseAllowedCommand(command: string): {
+    executable: string;
+    args: string[];
+    canonical: string;
+};

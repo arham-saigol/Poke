@@ -103,7 +103,7 @@ program
 program
   .command("stop")
   .description("Stop the daemon")
-  .action(() => {
+  .action(async () => {
     const paths = getPokePaths();
     const pid = readPid(paths.pid);
     if (!pid) {
@@ -121,7 +121,7 @@ program
         console.log(`Process ${pid} is not running.`);
       }
 
-      if (!waitForProcessExit(pid, 5000)) {
+      if (!await waitForProcessExit(pid, 5000)) {
         console.error(`Process ${pid} did not exit within timeout.`);
         process.exitCode = 1;
         return;
@@ -142,7 +142,7 @@ program
 program
   .command("restart")
   .description("Restart the daemon")
-  .action(() => {
+  .action(async () => {
     const paths = bootstrapPokeHome();
     const pid = readPid(paths.pid);
     if (pid) {
@@ -159,12 +159,7 @@ program
             processExited = true;
             break;
           }
-          // Sleep for 100ms before checking again
-          const sleepMs = 100;
-          const sleepEnd = Date.now() + sleepMs;
-          while (Date.now() < sleepEnd) {
-            // Busy wait
-          }
+          await sleepMs(100);
         }
         
         if (!processExited) {
@@ -371,19 +366,21 @@ function processExists(pid: number): boolean {
   }
 }
 
-function waitForProcessExit(pid: number, timeoutMs: number): boolean {
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
   const startTime = Date.now();
   while (Date.now() - startTime < timeoutMs) {
     if (!processExists(pid)) {
       return true;
     }
-    sleepMs(100);
+    await sleepMs(100);
   }
   return !processExists(pid);
 }
 
-function sleepMs(duration: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, duration);
+function sleepMs(duration: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, duration);
+  });
 }
 
 function commandExists(command: string): boolean {

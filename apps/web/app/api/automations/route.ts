@@ -16,11 +16,16 @@ export async function POST(request: Request): Promise<Response> {
   const authError = checkAuth(request);
   if (authError) return authError;
 
-  const body = await request.json() as any;
-  const automations = validateAutomations(body.automations);
-  const paths = getPokePaths();
-  writeJson(paths.automations, automations);
-  return Response.json({ automations });
+  try {
+    const body = await request.json() as any;
+    const automations = validateAutomations(body.automations);
+    const paths = getPokePaths();
+    writeJson(paths.automations, automations);
+    return Response.json({ automations });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "invalid input";
+    return Response.json({ error: message }, { status: 400 });
+  }
 }
 
 export async function PUT(request: Request): Promise<Response> {

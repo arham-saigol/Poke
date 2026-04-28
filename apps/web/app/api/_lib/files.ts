@@ -28,11 +28,12 @@ export function resolveRootFile(root: string, relativePath = ""): string {
 }
 
 export function resolveRootFileSafe(root: string, relativePath = ""): string {
-  const resolvedPath = safeResolve(rootPath(root), relativePath);
+  const baseRoot = rootPath(root);
+  const resolvedPath = safeResolve(baseRoot, relativePath);
   
   try {
     // Resolve symlinks to prevent symlink-based path traversal attacks
-    const realRoot = fs.realpathSync(rootPath(root));
+    const realRoot = fs.realpathSync(baseRoot);
     const realResolved = fs.realpathSync(resolvedPath);
     
     // Verify the real resolved path is within the real root
@@ -42,11 +43,15 @@ export function resolveRootFileSafe(root: string, relativePath = ""): string {
     
     return resolvedPath;
   } catch (err: any) {
-    // If file doesn't exist (ENOENT), fall back to path.resolve for validation
+    // If the target does not exist yet, validate the nearest existing ancestor's real path.
     if (err.code === "ENOENT") {
-      const realRoot = fs.realpathSync(rootPath(root));
-      // Verify the resolved path is within the root (without following symlinks for non-existent path)
-      if (!resolvedPath.startsWith(realRoot + path.sep) && resolvedPath !== realRoot) {
+      const realRoot = fs.realpathSync(baseRoot);
+      const ancestor = nearestExistingAncestor(resolvedPath);
+      if (!ancestor) {
+        throw new Error(`Path traversal detected: ${relativePath} resolves outside root`);
+      }
+      const realAncestor = fs.realpathSync(ancestor);
+      if (!realAncestor.startsWith(realRoot + path.sep) && realAncestor !== realRoot) {
         throw new Error(`Path traversal detected: ${relativePath} resolves outside root`);
       }
       return resolvedPath;
@@ -56,7 +61,7 @@ export function resolveRootFileSafe(root: string, relativePath = ""): string {
 }
 
 export function fileTree(root: string, relativePath = ""): Array<{ name: string; path: string; type: "file" | "directory"; children?: any[] }> {
-  const base = resolveRootFile(root, relativePath);
+  const base = resolveRootFileSafe(root, relativePath);
   if (!fs.existsSync(base)) return [];
   return fs.readdirSync(base, { withFileTypes: true })
     .filter((entry) => !entry.name.startsWith("."))
@@ -69,4 +74,18 @@ export function fileTree(root: string, relativePath = ""): Array<{ name: string;
       return { name: entry.name, path: rel, type: "file" as const };
     })
     .sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
+}
+
+function nearestExistingAncestor(candidate: string): string | null {
+  let current = path.resolve(candidate);
+  while (true) {
+    if (fs.existsSync(current)) {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
 }

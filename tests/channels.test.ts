@@ -12,9 +12,9 @@ test("slash commands update the shared session", async () => {
     const storage = await import("../packages/storage/src/index.ts");
     const channels = await import("../packages/channels/src/index.ts");
     storage.bootstrapPokeHome({ home });
-    const session = channels.handleSlashCommand("/reasoning medium", "web");
+    const session = await channels.handleSlashCommand("/reasoning medium", "web");
     assert.equal(session.reasoning, "medium");
-    assert.equal(channels.handleSlashCommand("/abort", "web").status, "aborted");
+    assert.equal((await channels.handleSlashCommand("/abort", "web")).status, "aborted");
     assert.notEqual(channels.newSession().id, session.id);
   } finally {
     if (originalPokeHome !== undefined) {

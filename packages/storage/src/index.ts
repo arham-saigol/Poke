@@ -149,7 +149,7 @@ export function bootstrapPokeHome(options: { home?: string; force?: boolean } = 
   try {
     migrateDatabase(paths);
   } catch (error) {
-    appendLog("warn", "storage.migration_failed", { error: String(error) });
+    appendLog("warn", "storage.migration_failed", { error: String(error) }, paths);
   }
   return paths;
 }
@@ -225,6 +225,15 @@ export function migrateDatabase(paths = getPokePaths()): void {
         metadata text,
         created_at text not null
       );
+      create index if not exists idx_daemon_events_level on daemon_events(level);
+      create index if not exists idx_daemon_events_created_at on daemon_events(created_at);
+      create index if not exists idx_automation_runs_automation_name on automation_runs(automation_name);
+      create index if not exists idx_automation_runs_status on automation_runs(status);
+      create index if not exists idx_automation_runs_started_at on automation_runs(started_at);
+      create index if not exists idx_audit_events_actor on audit_events(actor);
+      create index if not exists idx_audit_events_action on audit_events(action);
+      create index if not exists idx_audit_events_target on audit_events(target);
+      create index if not exists idx_audit_events_created_at on audit_events(created_at);
     `);
     db.prepare("insert or ignore into schema_migrations (version, applied_at) values (?, ?)").run(1, new Date().toISOString());
   } finally {
@@ -232,25 +241,37 @@ export function migrateDatabase(paths = getPokePaths()): void {
   }
 }
 
-export function audit(action: string, target?: string, metadata?: Record<string, unknown>, actor = "system"): void {
+export function audit(
+  action: string,
+  target?: string,
+  metadata?: Record<string, unknown>,
+  actor = "system",
+  paths?: PokePaths
+): void {
+  const activePaths = paths ?? getPokePaths();
   let db: any;
   try {
-    db = openDatabase();
+    db = openDatabase(activePaths);
     db.prepare(
       "insert into audit_events (actor, action, target, metadata, created_at) values (?, ?, ?, ?, ?)"
     ).run(actor, action, target ?? null, metadata ? JSON.stringify(metadata) : null, new Date().toISOString());
   } catch (error) {
-    appendLog("warn", "audit.write_failed", { action, target, error: String(error) });
+    appendLog("warn", "audit.write_failed", { action, target, error: String(error) }, activePaths);
   } finally {
     db?.close();
   }
 }
 
-export function appendLog(level: "info" | "warn" | "error", message: string, metadata?: Record<string, unknown>): void {
-  const paths = getPokePaths();
-  ensureDir(paths.logs);
+export function appendLog(
+  level: "info" | "warn" | "error",
+  message: string,
+  metadata?: Record<string, unknown>,
+  paths?: PokePaths
+): void {
+  const activePaths = paths ?? getPokePaths();
+  ensureDir(activePaths.logs);
   const entry = { time: new Date().toISOString(), level, message, metadata: metadata ? redactSecrets(metadata) : undefined };
-  fs.appendFileSync(path.join(paths.logs, "gateway.log"), `${JSON.stringify(entry)}\n`, "utf8");
+  fs.appendFileSync(path.join(activePaths.logs, "gateway.log"), `${JSON.stringify(entry)}\n`, "utf8");
 }
 
 type SecretsFile = {
@@ -273,7 +294,7 @@ function secretKey(): Buffer {
       const keyData = fs.readFileSync(paths.secretKey, "utf8");
       return Buffer.from(keyData, "hex");
     } catch (error) {
-      appendLog("warn", "storage.secret_key_read_failed", { error: String(error) });
+      appendLog("warn", "storage.secret_key_read_failed", { error: String(error) }, paths);
     }
   }
 
@@ -286,15 +307,10 @@ function secretKey(): Buffer {
     fs.writeFileSync(paths.secretKey, newKey.toString("hex"), { mode: 0o600 });
     appendLog("warn", "storage.secret_key_generated", {
       message: "Generated new encryption key. For production use, set POKE_SECRET_KEY environment variable."
-    });
+    }, paths);
   } catch (error) {
-    appendLog("error", "storage.secret_key_write_failed", { error: String(error) });
-    // Fall back to derived key if we can't write the file
-    const fallback = `${os.userInfo().username}:${os.hostname()}:poke-local-secret`;
-    appendLog("warn", "storage.secret_key_fallback", {
-      message: "Using derived key as fallback. This is less secure. Set POKE_SECRET_KEY for better security."
-    });
-    return crypto.createHash("sha256").update(fallback).digest();
+    appendLog("error", "storage.secret_key_write_failed", { error: String(error) }, paths);
+    throw new Error(`Failed to persist generated secret key at ${paths.secretKey}. Set POKE_SECRET_KEY or fix filesystem permissions.`);
   }
 
   return newKey;
@@ -321,7 +337,7 @@ function decrypt(value: string): string {
 export function createInitialSecrets(paths = getPokePaths()): void {
   const file: SecretsFile = {
     version: 1,
-    keyHint: process.env.POKE_SECRET_KEY ? "env:POKE_SECRET_KEY" : "local-machine-derived",
+    keyHint: process.env.POKE_SECRET_KEY ? "env:POKE_SECRET_KEY" : "file:.secret-key",
     values: {
       "web-session-secret": encrypt(crypto.randomBytes(32).toString("hex"))
     }
@@ -384,7 +400,7 @@ export function createBackup(label = "manual", paths = getPokePaths()): string {
     const destination = path.join(target, path.basename(entry));
     fs.cpSync(entry, destination, { recursive: true, force: true, errorOnExist: true });
   }
-  audit("backup.create", target, { label: sanitizedLabel });
+  audit("backup.create", target, { label: sanitizedLabel }, "system", paths);
   return target;
 }
 
@@ -392,6 +408,12 @@ export function restoreBackup(backupPath: string, paths = getPokePaths()): { res
   const source = path.resolve(backupPath);
   if (!fs.existsSync(source) || !fs.statSync(source).isDirectory()) {
     throw new Error(`Backup directory does not exist: ${backupPath}`);
+  }
+  ensureDir(paths.backups);
+  const backupsDirReal = fs.realpathSync(paths.backups);
+  const sourceReal = fs.realpathSync(source);
+  if (sourceReal !== backupsDirReal && !sourceReal.startsWith(`${backupsDirReal}${path.sep}`)) {
+    throw new Error(`Backup path must be inside ${paths.backups}: ${backupPath}`);
   }
   const safetyBackup = createBackup("pre-restore", paths);
   const entries = [
@@ -411,7 +433,7 @@ export function restoreBackup(backupPath: string, paths = getPokePaths()): { res
     fs.rmSync(to, { recursive: true, force: true });
     fs.cpSync(from, to, { recursive: true, force: true });
   }
-  audit("backup.restore", source, { safetyBackup });
+  audit("backup.restore", source, { safetyBackup }, "system", paths);
   return { restoredFrom: source, safetyBackup };
 }
 

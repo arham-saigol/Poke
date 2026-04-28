@@ -12,7 +12,7 @@ export type MessageResult = {
 export declare function getActiveSession(): ActiveSession;
 export declare function newSession(): ActiveSession;
 export declare function receiveMessage(input: IncomingMessageInput): Promise<MessageResult>;
-export declare function handleSlashCommand(command: string, channel: Channel): ActiveSession;
+export declare function handleSlashCommand(command: string, channel: Channel): Promise<ActiveSession>;
 export declare function writeSession(session: ActiveSession): void;
 export declare function getWhatsAppStatus(): {
     enabled: boolean;

@@ -59,7 +59,7 @@ export async function receiveMessage(input: IncomingMessageInput): Promise<Messa
     assertAllowedWhatsAppSender(input.from);
   }
   if (input.content.trim().startsWith("/")) {
-    const session = handleSlashCommand(input.content.trim(), input.channel);
+    const session = await handleSlashCommand(input.content.trim(), input.channel);
     const responseMessage = session.messages[session.messages.length - 1] ?? null;
     return { session, responseMessage };
   }
@@ -72,8 +72,7 @@ export async function receiveMessage(input: IncomingMessageInput): Promise<Messa
   registerRunningRequest(result.sessionId, controller);
 
   try {
-    const loadRuntime = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<any>;
-    const { parentTools } = await loadRuntime("@poke/agent-runtime");
+    const { parentTools } = await import("@poke/agent-runtime");
     const child = await parentTools.ask_poke({ task: input.content, reasoning: result.reasoning, signal: controller.signal });
     unregisterRunningRequest(result.sessionId, controller);
     const responseMessage = message("assistant", input.channel, child.output, undefined, result.sessionId);
@@ -106,28 +105,31 @@ export async function receiveMessage(input: IncomingMessageInput): Promise<Messa
   }
 }
 
-export function handleSlashCommand(command: string, channel: Channel): ActiveSession {
+export async function handleSlashCommand(command: string, channel: Channel): Promise<ActiveSession> {
   const [name, arg] = command.split(/\s+/, 2);
   if (name === "/new") return newSession();
-  const session = getActiveSession();
-  if (name === "/abort") {
-    session.status = "aborted";
-    session.messages.push(message("system", "system", "Current Poke activity was aborted.", undefined, session.id));
-    audit("session.abort", session.id, { channel });
-    abortRunningRequests(session.id);
-  } else if (name === "/reasoning") {
-    const level = parseReasoning(arg);
-    session.reasoning = level;
-    session.messages.push(message("system", "system", `Parent reasoning set to ${level}.`, undefined, session.id));
-    audit("session.reasoning", session.id, { level, channel });
-  } else if (name === "/restart") {
-    session.messages.push(message("system", "system", "Daemon restart requested. Use `poke restart` on the host to perform the restart in this scaffold.", undefined, session.id));
-    audit("daemon.restart.requested", session.id, { channel });
-  } else {
-    session.messages.push(message("system", "system", `Unknown slash command: ${name}`, undefined, session.id));
-  }
-  session.updatedAt = new Date().toISOString();
-  writeSession(session);
+  const { session } = await mutateActiveSession(async (current) => {
+    if (name === "/abort") {
+      current.status = "aborted";
+      current.messages.push(message("system", "system", "Current Poke activity was aborted.", undefined, current.id));
+      audit("session.abort", current.id, { channel });
+      abortRunningRequests(current.id);
+      return;
+    }
+    if (name === "/reasoning") {
+      const level = parseReasoning(arg);
+      current.reasoning = level;
+      current.messages.push(message("system", "system", `Parent reasoning set to ${level}.`, undefined, current.id));
+      audit("session.reasoning", current.id, { level, channel });
+      return;
+    }
+    if (name === "/restart") {
+      current.messages.push(message("system", "system", "Daemon restart requested. Use `poke restart` on the host to perform the restart in this scaffold.", undefined, current.id));
+      audit("daemon.restart.requested", current.id, { channel });
+      return;
+    }
+    current.messages.push(message("system", "system", `Unknown slash command: ${name}`, undefined, current.id));
+  });
   return session;
 }
 

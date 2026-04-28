@@ -1,4 +1,7 @@
+import crypto from "node:crypto";
+import dns from "node:dns/promises";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -69,15 +72,14 @@ export const childTools = {
     };
   },
   bash: async ({ command, cwd, timeoutSeconds }: { command: string; cwd?: string; timeoutSeconds?: number }) => {
-    assertAllowedCommand(command);
+    const { executable, args, canonical } = parseAllowedCommand(command);
     const paths = getPokePaths();
     const workingDirectory = cwd ? safeResolve(paths.workspace, cwd) : paths.workspace;
-    const { stdout, stderr } = await execFileAsync(command, {
+    const { stdout, stderr } = await execFileAsync(executable, args, {
       cwd: workingDirectory,
-      shell: true,
       timeout: (timeoutSeconds ?? 60) * 1000
     });
-    audit("workspace.bash", workingDirectory, { command });
+    audit("workspace.bash", workingDirectory, { command: canonical });
     return { stdout, stderr };
   },
   web_search: async ({ query, numResults }: { query: string; numResults?: number }) => exaSearch(query, numResults ?? 5),
@@ -125,7 +127,7 @@ async function completeWithPi(task: string, reasoning: ReasoningLevel, signal?: 
   const childModelConfig = config.models.child;
   
   // Map provider names to pi-ai format
-  const providerMap: Record<string, string> = {
+  const providerMap: Record<string, SupportedProvider> = {
     "openai-oauth": "openai",
     "openai-api": "openai",
     "anthropic": "anthropic",
@@ -133,20 +135,12 @@ async function completeWithPi(task: string, reasoning: ReasoningLevel, signal?: 
     "openrouter": "openrouter"
   };
   
-  const provider = providerMap[childModelConfig.provider] || "openai";
-  
-  // Get API key based on provider
-  const apiKey = getSecret("openai-api-key") ?? process.env.OPENAI_API_KEY;
-  if (!apiKey && provider === "openai") {
-    throw new Error("OpenAI is not configured. Add an OpenAI API key or OAuth integration before running agent tasks.");
+  const provider = providerMap[childModelConfig.provider] ?? "openai";
+  const apiKey = resolveModelApiKey(provider);
+  const model = getModel(provider as Parameters<typeof getModel>[0], childModelConfig.model as never);
+  if (!model) {
+    throw new Error(`Unsupported ${provider} model: ${childModelConfig.model}`);
   }
-  
-  // Create model with API key to avoid race conditions from mutating process.env
-  const model = (getModel as unknown as (provider: string, model: string, options?: { apiKey?: string }) => unknown)(
-    provider,
-    childModelConfig.model,
-    apiKey ? { apiKey } : undefined
-  );
   
   const runtime = createAgentRuntime();
   const systemPrompt = runtime.childSystemPrompt;
@@ -168,7 +162,8 @@ async function completeWithPi(task: string, reasoning: ReasoningLevel, signal?: 
     tools: toolDefinitions.length > 0 ? toolDefinitions : undefined
   }, {
     reasoning,
-    signal
+    signal,
+    apiKey
   });
   
   return response.content
@@ -231,12 +226,48 @@ function getToolParameters(name: ToolName): Record<string, any> {
 }
 
 async function generateImage(prompt: string, outputPath?: string): Promise<{ path: string }> {
+  return requestImageGeneration(prompt, outputPath);
+}
+
+async function generateImageWithImages(
+  prompt: string,
+  images: Array<{ name: string; mime: string; data: string }>,
+  outputPath?: string
+): Promise<{ path: string }> {
+  if (images.length === 0) {
+    throw new Error("At least one reference image is required.");
+  }
+  return requestImageGeneration(prompt, outputPath, images);
+}
+
+async function requestImageGeneration(
+  prompt: string,
+  outputPath?: string,
+  images: Array<{ name: string; mime: string; data: string }> = []
+): Promise<{ path: string }> {
   const apiKey = getSecret("vercel-ai-gateway-api-key") ?? process.env.VERCEL_AI_GATEWAY_API_KEY;
   if (!apiKey) throw new Error("Vercel AI Gateway API key is not configured.");
-  const response = await fetch("https://ai-gateway.vercel.sh/v1/images/generations", {
+  const endpoint = images.length > 0
+    ? "https://ai-gateway.vercel.sh/v1/images/edits"
+    : "https://ai-gateway.vercel.sh/v1/images/generations";
+  const body = images.length > 0
+    ? {
+        model: "openai/gpt-image-2",
+        prompt,
+        images: images.map((image) => ({
+          image_url: `data:${image.mime};base64,${image.data}`
+        })),
+        response_format: "b64_json"
+      }
+    : {
+        model: "openai/gpt-image-2",
+        prompt,
+        response_format: "b64_json"
+      };
+  const response = await fetch(endpoint, {
     method: "POST",
     headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
-    body: JSON.stringify({ model: "openai/gpt-image-2", prompt, response_format: "b64_json" })
+    body: JSON.stringify(body)
   });
   if (!response.ok) throw new Error(`Image generation failed: ${response.status} ${await response.text()}`);
   const result = await response.json() as any;
@@ -253,8 +284,8 @@ async function editImage(prompt: string, imagePaths: string[], outputPath?: stri
   if (imagePaths.length === 0 || imagePaths.length > 2) {
     throw new Error("edit_image requires one or two reference image paths.");
   }
-  const referenceSummary = imagePaths.map((imagePath) => `Reference image: ${workspacePath(imagePath)}`).join("\n");
-  return generateImage(`${prompt}\n\nUse these local reference images as visual guidance:\n${referenceSummary}`, outputPath);
+  const images = await Promise.all(imagePaths.map(loadWorkspaceImage));
+  return generateImageWithImages(prompt, images, outputPath);
 }
 
 async function exaSearch(query: string, numResults: number): Promise<any> {
@@ -270,17 +301,19 @@ async function exaSearch(query: string, numResults: number): Promise<any> {
 }
 
 async function webFetch(url: string): Promise<{ url: string; content: string }> {
-  const response = await fetch(url, { headers: { "user-agent": "Poke/0.1" } });
+  const parsedUrl = await validatePublicHttpsUrl(url);
+  const response = await fetch(parsedUrl.toString(), { headers: { "user-agent": "Poke/0.1" } });
   if (!response.ok) throw new Error(`Fetch failed: ${response.status}`);
-  return { url, content: await response.text() };
+  return { url: parsedUrl.toString(), content: await response.text() };
 }
 
 async function transcribeAudio(url: string, keepFile: boolean): Promise<{ transcript: string; mediaPath?: string }> {
   const apiKey = getSecret("deepgram-api-key") ?? process.env.DEEPGRAM_API_KEY;
   if (!apiKey) throw new Error("Deepgram API key is not configured.");
+  const sourceUrl = validateHttpUrl(url, "transcribe_audio");
   const target = workspacePath(`transcripts/audio-${Date.now()}.mp3`);
   ensureDir(path.dirname(target));
-  await execFileAsync("yt-dlp", ["-x", "--audio-format", "mp3", "-o", target, url], { timeout: 10 * 60 * 1000 });
+  await execFileAsync("yt-dlp", ["-x", "--audio-format", "mp3", "-o", target, sourceUrl], { timeout: 10 * 60 * 1000 });
   const audio = fs.readFileSync(target);
   const response = await fetch("https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true", {
     method: "POST",
@@ -295,20 +328,359 @@ async function transcribeAudio(url: string, keepFile: boolean): Promise<{ transc
 }
 
 function cryptoRandomId(): string {
-  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+  if (typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return crypto.randomBytes(16).toString("hex");
 }
 
-function assertAllowedCommand(command: string): void {
-  const blocked = [
-    /\brm\s+-rf\s+(\/|\*|~)/i,
-    /\bRemove-Item\b.*\s-Recurse\b.*\s-Force\b/i,
-    /\bformat\b/i,
-    /\bdiskpart\b/i,
-    /\bmkfs\b/i,
-    /\bshutdown\b/i,
-    /\breboot\b/i
-  ];
-  if (blocked.some((pattern) => pattern.test(command))) {
-    throw new Error("Command blocked by Poke safety policy.");
+export function assertAllowedCommand(command: string): void {
+  parseAllowedCommand(command);
+}
+
+export function parseAllowedCommand(command: string): { executable: string; args: string[]; canonical: string } {
+  const normalized = command.trim();
+  if (!normalized) {
+    throw new Error("Command is required.");
+  }
+  if (/[`]|(?:\$\()|[|&;<>]/.test(normalized)) {
+    throw new Error("Command contains disallowed shell syntax.");
+  }
+  if (/\b(?:base64|certutil|openssl)\b.*\b(?:-d|--decode|decode|frombase64string)\b/i.test(normalized)) {
+    throw new Error("Encoded command payloads are not allowed.");
+  }
+  const tokens = tokenizeCommand(normalized);
+  if (tokens.length === 0) {
+    throw new Error("Command is required.");
+  }
+  const [executable, ...args] = tokens;
+  if (/[\\/:\0]/.test(executable)) {
+    throw new Error("Command must use an approved executable name.");
+  }
+  if (!ALLOWED_COMMANDS.has(executable)) {
+    throw new Error(`Command is not permitted: ${executable}`);
+  }
+  if (SHELL_EXECUTABLES.has(executable)) {
+    throw new Error(`Shell interpreters are not permitted: ${executable}`);
+  }
+  validateCommandArguments(executable, args);
+  return { executable, args, canonical: [executable, ...args].join(" ") };
+}
+
+function resolveModelApiKey(provider: SupportedProvider): string {
+  const configured = {
+    openai: {
+      secret: "openai-api-key",
+      env: "OPENAI_API_KEY",
+      label: "OpenAI"
+    },
+    anthropic: {
+      secret: "anthropic-api-key",
+      env: "ANTHROPIC_API_KEY",
+      label: "Anthropic"
+    },
+    google: {
+      secret: "google-api-key",
+      env: "GOOGLE_API_KEY",
+      label: "Google"
+    },
+    openrouter: {
+      secret: "openrouter-api-key",
+      env: "OPENROUTER_API_KEY",
+      label: "OpenRouter"
+    }
+  }[provider];
+  const apiKey = getSecret(configured.secret) ?? process.env[configured.env];
+  if (!apiKey) {
+    throw new Error(`${configured.label} is not configured. Set ${configured.env} or store ${configured.secret} before running agent tasks.`);
+  }
+  return apiKey;
+}
+
+async function loadWorkspaceImage(imagePath: string): Promise<{ name: string; mime: string; data: string }> {
+  const file = workspacePath(imagePath);
+  const mime = mimeTypeForImage(file);
+  const buffer = await fs.promises.readFile(file);
+  return {
+    name: path.basename(file),
+    mime,
+    data: buffer.toString("base64")
+  };
+}
+
+function mimeTypeForImage(file: string): string {
+  const extension = path.extname(file).toLowerCase();
+  const mime = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif"
+  }[extension];
+  if (!mime) {
+    throw new Error(`Unsupported image type for edit_image: ${extension || "unknown"}`);
+  }
+  return mime;
+}
+
+async function validatePublicHttpsUrl(rawUrl: string): Promise<URL> {
+  const parsed = new URL(validateHttpUrl(rawUrl, "web_fetch"));
+  if (parsed.protocol !== "https:") {
+    throw new Error("web_fetch only allows https URLs.");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("web_fetch does not allow embedded credentials.");
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  if (BLOCKED_HOSTNAMES.has(hostname) || hostname.endsWith(".localhost")) {
+    throw new Error(`web_fetch does not allow local targets: ${hostname}`);
+  }
+  const resolvedAddresses = net.isIP(hostname)
+    ? [{ address: hostname, family: net.isIPv6(hostname) ? 6 : 4 }]
+    : await dns.lookup(hostname, { all: true, verbatim: true });
+  if (resolvedAddresses.length === 0) {
+    throw new Error(`web_fetch could not resolve ${hostname}`);
+  }
+  const blockedAddress = resolvedAddresses.find((entry) => isPrivateOrReservedAddress(entry.address));
+  if (blockedAddress) {
+    throw new Error(`web_fetch blocked private or reserved address ${blockedAddress.address} for ${hostname}`);
+  }
+  return parsed;
+}
+
+function validateHttpUrl(rawUrl: string, toolName: string): string {
+  const normalized = rawUrl.trim();
+  if (!normalized) {
+    throw new Error(`${toolName} requires a URL.`);
+  }
+  if (normalized.startsWith("-")) {
+    throw new Error(`${toolName} URL must not start with '-'.`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    throw new Error(`${toolName} requires an absolute http or https URL.`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`${toolName} only allows http and https URLs.`);
+  }
+  return parsed.toString();
+}
+
+function tokenizeCommand(command: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "'" | "\"" | null = null;
+  let escaping = false;
+  for (const character of command) {
+    if (escaping) {
+      current += character;
+      escaping = false;
+      continue;
+    }
+    if (quote === "'") {
+      if (character === "'") {
+        quote = null;
+      } else {
+        current += character;
+      }
+      continue;
+    }
+    if (quote === "\"") {
+      if (character === "\"") {
+        quote = null;
+      } else if (character === "\\") {
+        escaping = true;
+      } else {
+        current += character;
+      }
+      continue;
+    }
+    if (character === "\\" ) {
+      escaping = true;
+      continue;
+    }
+    if (character === "'" || character === "\"") {
+      quote = character;
+      continue;
+    }
+    if (/\s/.test(character)) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += character;
+  }
+  if (escaping || quote) {
+    throw new Error("Command contains an unterminated quote or escape sequence.");
+  }
+  if (current) {
+    tokens.push(current);
+  }
+  return tokens;
+}
+
+function validateCommandArguments(executable: string, args: string[]): void {
+  for (const arg of args) {
+    if (arg.includes("\0")) {
+      throw new Error("Command arguments may not contain null bytes.");
+    }
+    if (!arg.startsWith("-") && isUnsafePathToken(arg)) {
+      throw new Error(`Command argument is not allowed: ${arg}`);
+    }
+  }
+  switch (executable) {
+    case "git":
+      validateSubcommand(executable, args, ALLOWED_GIT_SUBCOMMANDS);
+      return;
+    case "npm":
+    case "pnpm":
+      validateSubcommand(executable, args, ALLOWED_PACKAGE_MANAGER_SUBCOMMANDS);
+      return;
+    case "node":
+      validateNodeCommand(args);
+      return;
+    case "python":
+    case "python3":
+      validatePythonCommand(args);
+      return;
+    case "pytest":
+      return;
+    default:
+      return;
   }
 }
+
+function validateSubcommand(executable: string, args: string[], allowedSubcommands: ReadonlySet<string>): void {
+  const subcommand = args.find((arg) => !arg.startsWith("-"));
+  if (!subcommand) {
+    throw new Error(`${executable} requires an allowed subcommand.`);
+  }
+  if (!allowedSubcommands.has(subcommand)) {
+    throw new Error(`${executable} subcommand is not permitted: ${subcommand}`);
+  }
+}
+
+function validateNodeCommand(args: string[]): void {
+  if (args.length === 1 && args[0] === "--version") {
+    return;
+  }
+  if (args.length === 0) {
+    throw new Error("node requires a script path.");
+  }
+  if (args.some((arg) => ["-e", "--eval", "-p", "--print", "-i", "--interactive", "--input-type", "-r", "--require"].includes(arg))) {
+    throw new Error("node inline execution flags are not permitted.");
+  }
+  const script = args.find((arg) => !arg.startsWith("-"));
+  if (!script || !/\.(?:[cm]?js|ts)$/i.test(script)) {
+    throw new Error("node requires a .js, .mjs, .cjs, or .ts script path.");
+  }
+}
+
+function validatePythonCommand(args: string[]): void {
+  if (args.length === 0) {
+    throw new Error("python requires a script path.");
+  }
+  if (args.some((arg) => arg === "-c" || arg === "-m")) {
+    throw new Error("python inline or module execution is not permitted.");
+  }
+  const script = args.find((arg) => !arg.startsWith("-"));
+  if (!script || !/\.py$/i.test(script)) {
+    throw new Error("python requires a .py script path.");
+  }
+}
+
+function isUnsafePathToken(token: string): boolean {
+  if (/^(?:[a-zA-Z]:[\\/]|[\\/]|~[\\/])/.test(token)) {
+    return true;
+  }
+  return token.split(/[\\/]+/).some((segment) => segment === "..");
+}
+
+function isPrivateOrReservedAddress(address: string): boolean {
+  const mappedIpv4 = extractMappedIpv4(address);
+  if (mappedIpv4) {
+    return isPrivateOrReservedIpv4(mappedIpv4);
+  }
+  if (net.isIPv4(address)) {
+    return isPrivateOrReservedIpv4(address);
+  }
+  if (net.isIPv6(address)) {
+    return isPrivateOrReservedIpv6(address);
+  }
+  return true;
+}
+
+function extractMappedIpv4(address: string): string | null {
+  const match = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);
+  return match?.[1] ?? null;
+}
+
+function isPrivateOrReservedIpv4(address: string): boolean {
+  const octets = address.split(".").map((part) => Number(part));
+  if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return true;
+  }
+  const [a, b] = octets;
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 0) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 198 && (b === 18 || b === 19)) return true;
+  if (a === 198 && b === 51) return true;
+  if (a === 203 && b === 0) return true;
+  if (a >= 224) return true;
+  return false;
+}
+
+function isPrivateOrReservedIpv6(address: string): boolean {
+  const normalized = address.toLowerCase();
+  return (
+    normalized === "::"
+    || normalized === "::1"
+    || normalized.startsWith("fc")
+    || normalized.startsWith("fd")
+    || normalized.startsWith("fe8")
+    || normalized.startsWith("fe9")
+    || normalized.startsWith("fea")
+    || normalized.startsWith("feb")
+  );
+}
+
+type SupportedProvider = "openai" | "anthropic" | "google" | "openrouter";
+
+const SHELL_EXECUTABLES = new Set(["bash", "sh", "zsh", "pwsh", "powershell", "cmd"]);
+const ALLOWED_COMMANDS = new Set([
+  "cat",
+  "cut",
+  "echo",
+  "file",
+  "find",
+  "git",
+  "grep",
+  "head",
+  "ls",
+  "node",
+  "npm",
+  "pnpm",
+  "pwd",
+  "pytest",
+  "python",
+  "python3",
+  "rg",
+  "sed",
+  "sort",
+  "stat",
+  "tail",
+  "tr",
+  "uniq",
+  "wc"
+]);
+const ALLOWED_GIT_SUBCOMMANDS = new Set(["branch", "diff", "log", "ls-files", "rev-parse", "show", "status"]);
+const ALLOWED_PACKAGE_MANAGER_SUBCOMMANDS = new Set(["build", "check", "install", "lint", "run", "test", "typecheck"]);
+const BLOCKED_HOSTNAMES = new Set(["localhost", "ip6-localhost", "ip6-loopback", "metadata.google.internal"]);

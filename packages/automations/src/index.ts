@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import process from "node:process";
 import { automationsFileSchema, type Automation } from "@poke/shared";
 import { appendLog, readAutomations } from "@poke/storage";
 
@@ -58,17 +59,34 @@ export async function runAutomation(automation: Automation): Promise<{ status: "
   return runCommand(automation);
 }
 
-function runCommand(automation: Automation): Promise<{ status: "completed" | "failed"; output: string }> {
+async function runCommand(automation: Automation): Promise<{ status: "completed" | "failed"; output: string }> {
   if (automation.action.type !== "command") throw new Error("Expected command automation.");
   const action = automation.action;
+  const runtime = await loadAgentRuntime();
+  runtime.assertAllowedCommand(action.command);
+  const { executable, args } = runtime.parseAllowedCommand(action.command);
   return new Promise((resolve) => {
     let settled = false;
-    
-    const child = spawn(action.command, {
+
+    const child = spawn(executable, args, {
       cwd: action.cwd,
-      shell: true,
-      timeout: (action.timeoutSeconds ?? 300) * 1000
+      detached: process.platform !== "win32"
     });
+    const timeoutMs = (action.timeoutSeconds ?? 300) * 1000;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      terminateChild(child.pid);
+      appendLog("error", "automation.run.timeout", {
+        name: automation.name,
+        status: "failed",
+        timeoutMs
+      });
+      resolve({
+        status: "failed",
+        output: `${output}\nProcess timed out after ${timeoutMs}ms`.trim()
+      });
+    }, timeoutMs);
     
     let output = "";
     
@@ -83,6 +101,7 @@ function runCommand(automation: Automation): Promise<{ status: "completed" | "fa
     child.on("error", (error) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timeout);
 
       const errorMessage = `Process error: ${error.message}`;
       appendLog("error", "automation.run.error", {
@@ -100,6 +119,7 @@ function runCommand(automation: Automation): Promise<{ status: "completed" | "fa
     child.on("exit", (code) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timeout);
 
       const status = code === 0 ? "completed" : "failed";
       appendLog(status === "completed" ? "info" : "error", "automation.run.finished", {
@@ -110,6 +130,23 @@ function runCommand(automation: Automation): Promise<{ status: "completed" | "fa
       resolve({ status, output });
     });
   });
+}
+
+function terminateChild(pid: number | undefined): void {
+  if (!pid) return;
+  try {
+    if (process.platform !== "win32") {
+      process.kill(-pid, "SIGKILL");
+      return;
+    }
+  } catch {
+    // Fall through to direct process kill.
+  }
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // Process may already be gone.
+  }
 }
 
 type CronField = {
@@ -240,6 +277,8 @@ async function loadAgentRuntime(): Promise<{
   parentTools: {
     ask_poke: (input: { task: string; reasoning: "low" | "medium" | "high" }) => Promise<{ output: string }>;
   };
+  assertAllowedCommand: (command: string) => void;
+  parseAllowedCommand: (command: string) => { executable: string; args: string[]; canonical: string };
 }> {
   let lastError: unknown;
   for (const candidate of [
@@ -251,6 +290,8 @@ async function loadAgentRuntime(): Promise<{
         parentTools: {
           ask_poke: (input: { task: string; reasoning: "low" | "medium" | "high" }) => Promise<{ output: string }>;
         };
+        assertAllowedCommand: (command: string) => void;
+        parseAllowedCommand: (command: string) => { executable: string; args: string[]; canonical: string };
       };
     } catch (error) {
       lastError = error;
