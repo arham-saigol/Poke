@@ -89,6 +89,14 @@ program
       env: { ...process.env, POKE_HOME: paths.home }
     });
     child.unref();
+    
+    try {
+      fs.writeFileSync(paths.pid, String(child.pid), "utf8");
+    } catch (error) {
+      console.error(`Failed to write PID file: ${String(error)}`);
+      throw error;
+    }
+    
     console.log(`Started Poke daemon with pid ${child.pid}.`);
   });
 
@@ -104,6 +112,7 @@ program
     }
     try {
       process.kill(pid, "SIGTERM");
+      fs.rmSync(paths.pid, { force: true });
       console.log(`Sent SIGTERM to Poke daemon pid ${pid}.`);
     } catch (error) {
       console.error(`Failed to stop pid ${pid}: ${String(error)}`);

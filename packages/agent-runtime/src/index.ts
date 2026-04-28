@@ -6,7 +6,7 @@ import { completeSimple, getModel } from "@mariozechner/pi-ai";
 import { discloseConnectorTools, childConnectorToolNames } from "@poke/connectors";
 import { deleteMemory, getIndex, readMemory, writeMemory } from "@poke/memory";
 import { childBaseToolNames, parentToolNames, type ReasoningLevel, type ToolName } from "@poke/shared";
-import { appendLog, audit, ensureDir, getPokePaths, getSecret, safeResolve } from "@poke/storage";
+import { appendLog, audit, ensureDir, getPokePaths, getSecret, readConfig, safeResolve } from "@poke/storage";
 import { listSkills } from "@poke/skills";
 
 const execFileAsync = promisify(execFile);
@@ -121,18 +121,55 @@ function workspacePath(inputPath: string): string {
 }
 
 async function completeWithPi(task: string, reasoning: ReasoningLevel): Promise<string> {
+  const config = readConfig();
+  const childModelConfig = config.models.child;
+  
+  // Map provider names to pi-ai format
+  const providerMap: Record<string, string> = {
+    "openai-oauth": "openai",
+    "openai-api": "openai",
+    "anthropic": "anthropic",
+    "google": "google",
+    "openrouter": "openrouter"
+  };
+  
+  const provider = providerMap[childModelConfig.provider] || "openai";
+  const model = getModel(provider, childModelConfig.model);
+  
+  // Get API key based on provider
   const apiKey = getSecret("openai-api-key") ?? process.env.OPENAI_API_KEY;
-  if (!apiKey) {
+  if (!apiKey && provider === "openai") {
     throw new Error("OpenAI is not configured. Add an OpenAI API key or OAuth integration before running agent tasks.");
   }
+  
   const previous = process.env.OPENAI_API_KEY;
-  process.env.OPENAI_API_KEY = apiKey;
+  if (provider === "openai") {
+    process.env.OPENAI_API_KEY = apiKey;
+  }
+  
   try {
-    const response = await completeSimple(getModel("openai", "gpt-5-mini"), {
-      messages: [{ role: "user", content: task, timestamp: Date.now() }]
+    const runtime = createAgentRuntime();
+    const systemPrompt = runtime.childSystemPrompt;
+    
+    // Build tool definitions for the child agent
+    const toolDefinitions = Object.entries(childTools)
+      .filter(([name]) => runtime.childTools.includes(name as ToolName))
+      .map(([name, impl]) => ({
+        name,
+        description: getToolDescription(name as ToolName),
+        parameters: getToolParameters(name as ToolName)
+      }));
+    
+    const response = await completeSimple(model, {
+      messages: [
+        { role: "system", content: systemPrompt, timestamp: Date.now() },
+        { role: "user", content: task, timestamp: Date.now() }
+      ],
+      tools: toolDefinitions.length > 0 ? toolDefinitions : undefined
     }, {
       reasoning
     });
+    
     return response.content
       .filter((block: any) => block.type === "text")
       .map((block: any) => block.text)
@@ -142,6 +179,58 @@ async function completeWithPi(task: string, reasoning: ReasoningLevel): Promise<
     if (previous) process.env.OPENAI_API_KEY = previous;
     else delete process.env.OPENAI_API_KEY;
   }
+}
+
+function getToolDescription(name: ToolName): string {
+  const descriptions: Record<ToolName, string> = {
+    get_index: "Get the memory index listing all available memory files",
+    read_memory: "Read a memory file by path",
+    write_memory: "Write or update a memory file",
+    delete_memory: "Delete a memory file",
+    ask_poke: "Delegate a task to the child agent",
+    send_message: "Send a message to the user",
+    read: "Read a file from the workspace",
+    write: "Write a file to the workspace",
+    edit: "Request an edit to a workspace file",
+    bash: "Execute a bash command in the workspace",
+    web_search: "Search the web using Exa",
+    web_fetch: "Fetch content from a URL",
+    deep_research: "Perform deep research on a topic",
+    generate_image: "Generate an image from a text prompt",
+    edit_image: "Edit an image using reference images",
+    transcribe_audio: "Transcribe audio from a URL",
+    use_github: "Enable GitHub connector tools",
+    use_notion: "Enable Notion connector tools",
+    use_posthog: "Enable PostHog connector tools",
+    use_agentmail: "Enable AgentMail connector tools"
+  };
+  return descriptions[name] || "";
+}
+
+function getToolParameters(name: ToolName): Record<string, any> {
+  const parameters: Record<ToolName, Record<string, any>> = {
+    get_index: { type: "object", properties: {}, required: [] },
+    read_memory: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+    write_memory: { type: "object", properties: { path: { type: "string" }, title: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
+    delete_memory: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+    ask_poke: { type: "object", properties: { task: { type: "string" }, reasoning: { type: "string", enum: ["low", "medium", "high"] } }, required: ["task", "reasoning"] },
+    send_message: { type: "object", properties: { content: { type: "string" }, media_path: { type: "string" } }, required: ["content"] },
+    read: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+    write: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
+    edit: { type: "object", properties: { path: { type: "string" }, instructions: { type: "string" } }, required: ["path", "instructions"] },
+    bash: { type: "object", properties: { command: { type: "string" }, cwd: { type: "string" }, timeoutSeconds: { type: "number" } }, required: ["command"] },
+    web_search: { type: "object", properties: { query: { type: "string" }, numResults: { type: "number" } }, required: ["query"] },
+    web_fetch: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
+    deep_research: { type: "object", properties: { prompt: { type: "string" } }, required: ["prompt"] },
+    generate_image: { type: "object", properties: { prompt: { type: "string" }, outputPath: { type: "string" } }, required: ["prompt"] },
+    edit_image: { type: "object", properties: { prompt: { type: "string" }, imagePaths: { type: "array", items: { type: "string" } }, outputPath: { type: "string" } }, required: ["prompt", "imagePaths"] },
+    transcribe_audio: { type: "object", properties: { url: { type: "string" }, keepFile: { type: "boolean" } }, required: ["url"] },
+    use_github: { type: "object", properties: {}, required: [] },
+    use_notion: { type: "object", properties: {}, required: [] },
+    use_posthog: { type: "object", properties: {}, required: [] },
+    use_agentmail: { type: "object", properties: {}, required: [] }
+  };
+  return parameters[name] || { type: "object", properties: {}, required: [] };
 }
 
 async function generateImage(prompt: string, outputPath?: string): Promise<{ path: string }> {

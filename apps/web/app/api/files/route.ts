@@ -51,6 +51,14 @@ export async function DELETE(request: Request): Promise<Response> {
   const root = url.searchParams.get("root") ?? "workspace";
   const relativePath = url.searchParams.get("path") ?? "";
   if (!relativePath) return Response.json({ error: "path is required" }, { status: 400 });
+  
+  // Normalize and validate path to prevent root deletes and traversal attacks
+  const normalized = path.posix.normalize(relativePath);
+  if (normalized === "." || normalized === "/" || normalized === "" || normalized === "./" ||
+      normalized.startsWith("../") || normalized.includes("/../")) {
+    return Response.json({ error: "invalid path: cannot delete root or traverse upward" }, { status: 400 });
+  }
+  
   if (root === "memory" && relativePath !== "index.md") {
     return Response.json(deleteMemory(relativePath));
   }

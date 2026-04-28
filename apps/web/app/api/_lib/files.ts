@@ -13,7 +13,18 @@ export function rootPath(root: string): string {
 }
 
 export function resolveRootFile(root: string, relativePath = ""): string {
-  return safeResolve(rootPath(root), relativePath);
+  const resolvedPath = safeResolve(rootPath(root), relativePath);
+  
+  // Resolve symlinks to prevent symlink-based path traversal attacks
+  const realRoot = fs.realpathSync(rootPath(root));
+  const realResolved = fs.realpathSync(resolvedPath);
+  
+  // Verify the real resolved path is within the real root
+  if (!realResolved.startsWith(realRoot + path.sep) && realResolved !== realRoot) {
+    throw new Error(`Path traversal detected: ${relativePath} resolves outside root`);
+  }
+  
+  return resolvedPath;
 }
 
 export function fileTree(root: string, relativePath = ""): Array<{ name: string; path: string; type: "file" | "directory"; children?: any[] }> {
