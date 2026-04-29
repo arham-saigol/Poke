@@ -116,8 +116,16 @@ const server = http.createServer(async (request, response) => {
         sendJson(response, { error: error instanceof Error ? error.message : String(error) }, 403);
         return;
       }
-      const result = await receiveMessage({ channel: "whatsapp", content: String(body.content ?? ""), mediaPath: body.mediaPath, from: body.from });
-      sendJson(response, result.session);
+      try {
+        const result = await receiveMessage({ channel: "whatsapp", content: String(body.content ?? ""), mediaPath: body.mediaPath, from: body.from });
+        sendJson(response, result.session);
+      } catch (error) {
+        if (error instanceof Error && error.message === "WhatsApp sender is not allowed.") {
+          sendJson(response, { error: error.message }, 403);
+          return;
+        }
+        sendJson(response, { error: error instanceof Error ? error.message : String(error) }, 500);
+      }
       return;
     }
 

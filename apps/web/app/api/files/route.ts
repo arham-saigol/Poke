@@ -3,14 +3,15 @@ import path from "node:path";
 import { deleteMemory } from "@poke/memory";
 import { readMemory, writeMemory } from "@poke/memory";
 import { ensureDir } from "@poke/storage";
+import type { FileRoot } from "../_lib/files";
 import { fileTree, resolveRootFile, resolveRootFileSafe, rootPath } from "../_lib/files";
 
 export const dynamic = "force-dynamic";
 
-const ALLOWED_ROOTS = ["workspace", "memory", "skills"];
+const ALLOWED_ROOTS = ["workspace", "memory", "skills"] as const;
 
-function validateRoot(root: string): boolean {
-  return ALLOWED_ROOTS.includes(root);
+function validateRoot(root: string): root is FileRoot {
+  return (ALLOWED_ROOTS as readonly string[]).includes(root);
 }
 
 export async function GET(request: Request): Promise<Response> {

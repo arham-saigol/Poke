@@ -107,7 +107,14 @@ export async function receiveMessage(input: IncomingMessageInput): Promise<Messa
 
 export async function handleSlashCommand(command: string, channel: Channel): Promise<ActiveSession> {
   const [name, arg] = command.split(/\s+/, 2);
-  if (name === "/new") return newSession();
+  if (name === "/new") {
+    // Create the new session inside the same lock the other slash-command mutations
+    // use so the rotation is atomic with respect to concurrent reads/writes. We use
+    // withSessionLock directly (rather than mutateActiveSession) because the latter
+    // re-writes the previous session on the way out, which would clobber the freshly
+    // created one.
+    return await withSessionLock(ACTIVE_SESSION_LOCK, async () => newSession());
+  }
   const { session } = await mutateActiveSession(async (current) => {
     if (name === "/abort") {
       current.status = "aborted";

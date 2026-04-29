@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
+import path from "node:path";
 import process from "node:process";
 import { automationsFileSchema, type Automation } from "@poke/shared";
-import { appendLog, readAutomations } from "@poke/storage";
+import { appendLog, getPokePaths, readAutomations } from "@poke/storage";
 
 export function validateAutomations(value: unknown): Automation[] {
   return automationsFileSchema.parse(value);
@@ -65,11 +66,24 @@ async function runCommand(automation: Automation): Promise<{ status: "completed"
   const runtime = await loadAgentRuntime();
   runtime.assertAllowedCommand(action.command);
   const { executable, args } = runtime.parseAllowedCommand(action.command);
+  const workspaceRoot = getPokePaths().workspace;
+  const requestedCwd = action.cwd ? path.resolve(workspaceRoot, action.cwd) : workspaceRoot;
+  const relativeCwd = path.relative(workspaceRoot, requestedCwd);
+  const safeCwd = (relativeCwd === "" || (!relativeCwd.startsWith("..") && !path.isAbsolute(relativeCwd)))
+    ? requestedCwd
+    : workspaceRoot;
+  if (safeCwd !== requestedCwd) {
+    appendLog("warn", "automation.cwd_clamped", {
+      name: automation.name,
+      requested: action.cwd ?? null,
+      workspace: workspaceRoot
+    });
+  }
   return new Promise((resolve) => {
     let settled = false;
 
     const child = spawn(executable, args, {
-      cwd: action.cwd,
+      cwd: safeCwd,
       detached: process.platform !== "win32"
     });
     // Detach the child from the parent's reference count so the parent can exit
@@ -121,7 +135,7 @@ async function runCommand(automation: Automation): Promise<{ status: "completed"
       });
     });
 
-    child.on("exit", (code) => {
+    child.on("close", (code) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
@@ -202,12 +216,10 @@ function computeNextCronOccurrence(expression: string, timeZone: string, referen
 
 function parseCronField(field: string, min: number, max: number, mapSunday = false): CronField {
   const values = new Set<number>();
-  // A field is a wildcard if every segment is "*" or "*/step" — i.e. it imposes no
-  // restriction beyond the natural range.
-  const isWildcard = field.split(",").every((segment) => {
-    const [base] = segment.split("/");
-    return base === "*";
-  });
+  // A field is a wildcard only when the entire field is exactly "*" with no step
+  // (e.g. "*/2" is restrictive, so it must NOT count as a wildcard for the
+  // POSIX day-of-month/day-of-week OR semantics).
+  const isWildcard = field === "*";
   for (const segment of field.split(",")) {
     const [base, stepPart] = segment.split("/");
     const step = stepPart ? Number(stepPart) : 1;

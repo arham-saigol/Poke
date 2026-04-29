@@ -346,10 +346,38 @@ async function exaSearch(query: string, numResults: number): Promise<any> {
   return response.json();
 }
 
+const FETCH_TIMEOUT_MS = 30_000;
+const MAX_FETCH_BYTES = 10 * 1024 * 1024;
+
 async function webFetch(url: string): Promise<{ url: string; content: string }> {
   const { url: parsedUrl, resolvedAddress, family } = await validatePublicHttpsUrl(url);
   return await new Promise<{ url: string; content: string }>((resolve, reject) => {
     const port = parsedUrl.port ? Number(parsedUrl.port) : 443;
+    let settled = false;
+    let timeoutTimer: NodeJS.Timeout | null = null;
+    let activeResponse: import("node:http").IncomingMessage | null = null;
+
+    const cleanup = () => {
+      if (timeoutTimer) {
+        clearTimeout(timeoutTimer);
+        timeoutTimer = null;
+      }
+    };
+    const settleReject = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      try { activeResponse?.destroy(); } catch { /* ignore */ }
+      try { request.destroy(); } catch { /* ignore */ }
+      reject(error);
+    };
+    const settleResolve = (value: { url: string; content: string }) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+
     const request = https.request(
       {
         host: parsedUrl.hostname,
@@ -368,21 +396,33 @@ async function webFetch(url: string): Promise<{ url: string; content: string }> 
         }
       },
       (response) => {
+        activeResponse = response;
         const status = response.statusCode ?? 0;
         if (status < 200 || status >= 300) {
           response.resume();
-          reject(new Error(`Fetch failed: ${status}`));
+          settleReject(new Error(`Fetch failed: ${status}`));
           return;
         }
         const chunks: Buffer[] = [];
-        response.on("data", (chunk: Buffer) => chunks.push(chunk));
-        response.on("end", () => {
-          resolve({ url: parsedUrl.toString(), content: Buffer.concat(chunks).toString("utf8") });
+        let received = 0;
+        response.on("data", (chunk: Buffer) => {
+          received += chunk.length;
+          if (received > MAX_FETCH_BYTES) {
+            settleReject(new Error(`Fetch failed: response exceeded ${MAX_FETCH_BYTES} bytes`));
+            return;
+          }
+          chunks.push(chunk);
         });
-        response.on("error", reject);
+        response.on("end", () => {
+          settleResolve({ url: parsedUrl.toString(), content: Buffer.concat(chunks).toString("utf8") });
+        });
+        response.on("error", settleReject);
       }
     );
-    request.on("error", reject);
+    request.on("error", settleReject);
+    timeoutTimer = setTimeout(() => {
+      settleReject(new Error(`Fetch failed: timed out after ${FETCH_TIMEOUT_MS}ms`));
+    }, FETCH_TIMEOUT_MS);
     request.end();
   });
 }
@@ -391,6 +431,7 @@ async function transcribeAudio(url: string, keepFile: boolean): Promise<{ transc
   const apiKey = getSecret("deepgram-api-key") ?? process.env.DEEPGRAM_API_KEY;
   if (!apiKey) throw new Error("Deepgram API key is not configured.");
   const sourceUrl = validateHttpUrl(url, "transcribe_audio");
+  await assertPublicHttpHostname(sourceUrl, "transcribe_audio");
   const target = workspacePath(`transcripts/audio-${Date.now()}.mp3`);
   ensureDir(path.dirname(target));
   await execFileAsync("yt-dlp", ["-x", "--audio-format", "mp3", "-o", target, sourceUrl], { timeout: 10 * 60 * 1000 });
@@ -529,6 +570,24 @@ async function validatePublicHttpsUrl(rawUrl: string): Promise<{ url: URL; resol
   // a different (potentially private) IP via DNS rebinding between validation and connect.
   const pinned = resolvedAddresses[0]!;
   return { url: parsed, resolvedAddress: pinned.address, family: pinned.family };
+}
+
+async function assertPublicHttpHostname(rawUrl: string, toolName: string): Promise<void> {
+  const parsed = new URL(rawUrl);
+  const hostname = parsed.hostname.toLowerCase();
+  if (BLOCKED_HOSTNAMES.has(hostname) || hostname.endsWith(".localhost")) {
+    throw new Error(`${toolName} does not allow local targets: ${hostname}`);
+  }
+  const resolvedAddresses = net.isIP(hostname)
+    ? [{ address: hostname, family: net.isIPv6(hostname) ? 6 : 4 }]
+    : await dns.lookup(hostname, { all: true, verbatim: true });
+  if (resolvedAddresses.length === 0) {
+    throw new Error(`${toolName} could not resolve ${hostname}`);
+  }
+  const blockedAddress = resolvedAddresses.find((entry) => isPrivateOrReservedAddress(entry.address));
+  if (blockedAddress) {
+    throw new Error(`${toolName} blocked private or reserved address ${blockedAddress.address} for ${hostname}`);
+  }
 }
 
 function validateHttpUrl(rawUrl: string, toolName: string): string {

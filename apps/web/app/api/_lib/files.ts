@@ -4,7 +4,14 @@ import { getPokePaths, safeResolve } from "@poke/storage";
 
 export type FileRoot = "workspace" | "memory" | "skills";
 
-export function rootPath(root: string): string {
+export type FileNode = {
+  name: string;
+  path: string;
+  type: "file" | "directory";
+  children?: FileNode[];
+};
+
+export function rootPath(root: FileRoot): string {
   const paths = getPokePaths();
   if (root === "workspace") return paths.workspace;
   if (root === "memory") return paths.memory;
@@ -12,7 +19,7 @@ export function rootPath(root: string): string {
   throw new Error(`Unsupported file root: ${root}`);
 }
 
-export function resolveRootFile(root: string, relativePath = ""): string {
+export function resolveRootFile(root: FileRoot, relativePath = ""): string {
   const resolvedPath = safeResolve(rootPath(root), relativePath);
   
   // Resolve symlinks to prevent symlink-based path traversal attacks
@@ -27,7 +34,7 @@ export function resolveRootFile(root: string, relativePath = ""): string {
   return resolvedPath;
 }
 
-export function resolveRootFileSafe(root: string, relativePath = ""): string {
+export function resolveRootFileSafe(root: FileRoot, relativePath = ""): string {
   const baseRoot = rootPath(root);
   const resolvedPath = safeResolve(baseRoot, relativePath);
   
@@ -60,20 +67,22 @@ export function resolveRootFileSafe(root: string, relativePath = ""): string {
   }
 }
 
-export function fileTree(root: string, relativePath = ""): Array<{ name: string; path: string; type: "file" | "directory"; children?: any[] }> {
+export function fileTree(root: FileRoot, relativePath = ""): FileNode[] {
   const base = resolveRootFileSafe(root, relativePath);
   if (!fs.existsSync(base)) return [];
-  return fs.readdirSync(base, { withFileTypes: true })
+  const nodes: FileNode[] = fs.readdirSync(base, { withFileTypes: true })
     .filter((entry) => !entry.name.startsWith("."))
     .map((entry) => {
       const full = path.join(base, entry.name);
       const rel = path.relative(rootPath(root), full).replaceAll("\\", "/");
       if (entry.isDirectory()) {
-        return { name: entry.name, path: rel, type: "directory" as const, children: fileTree(root, rel) };
+        const node: FileNode = { name: entry.name, path: rel, type: "directory", children: fileTree(root, rel) };
+        return node;
       }
-      return { name: entry.name, path: rel, type: "file" as const };
-    })
-    .sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
+      const node: FileNode = { name: entry.name, path: rel, type: "file" };
+      return node;
+    });
+  return nodes.sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
 }
 
 function nearestExistingAncestor(candidate: string): string | null {

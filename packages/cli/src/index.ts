@@ -180,11 +180,12 @@ program
     // The OS may need a moment to release listening ports / file locks held by the
     // previous daemon. Retry the start with a short backoff before giving up so a
     // transient race does not turn into a failed restart.
+    const workspaceRoot = findWorkspaceRoot();
     const maxAttempts = 5;
     let backoffMs = 200;
     let lastStatus: number | null = 0;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      const result = spawnSync(process.execPath, [process.argv[1]!, "start"], { stdio: "inherit" });
+      const result = spawnSync(process.execPath, [process.argv[1]!, "start"], { stdio: "inherit", cwd: workspaceRoot });
       lastStatus = result.status;
       if (result.status === 0) {
         process.exitCode = 0;

@@ -211,15 +211,33 @@ function Customize() {
 function Connectors() {
   const [items, setItems] = useState<any[]>([]);
   const [credentials, setCredentials] = useState<Record<string, string>>({});
+  const [showCredential, setShowCredential] = useState<Record<string, boolean>>({});
   async function refresh() { setItems((await api("/api/connectors")).connectors); }
   useEffect(() => { void refresh(); }, []);
   return <section className="pane"><header className="toolbar"><div><h1>Connectors</h1><p>Progressive tools for the child agent</p></div></header>
     <div className="grid">{items.map((item) => {
       const Icon = getConnectorIcon(item.name);
+      const revealed = Boolean(showCredential[item.name]);
       return <article className="card" key={item.name}>
       <div className="cardTitle"><Icon size={18} />{item.displayName}</div>
       <p>{item.authType === "oauth" ? "OAuth connector" : "API key connector"} · {item.status}</p>
-      <input value={credentials[item.name] ?? ""} onChange={(event) => setCredentials({ ...credentials, [item.name]: (event.currentTarget as HTMLInputElement).value })} placeholder={item.authType === "oauth" ? "OAuth token placeholder" : "API key"} />
+      <div className="secretField">
+        <input
+          type={revealed ? "text" : "password"}
+          value={credentials[item.name] ?? ""}
+          onChange={(event) => setCredentials({ ...credentials, [item.name]: (event.currentTarget as HTMLInputElement).value })}
+          placeholder={item.authType === "oauth" ? "OAuth token placeholder" : "API key"}
+        />
+        <button
+          className="iconButton"
+          type="button"
+          onClick={() => setShowCredential({ ...showCredential, [item.name]: !revealed })}
+          title={revealed ? `Hide ${item.displayName} credential` : `Reveal ${item.displayName} credential`}
+          aria-label={revealed ? `Hide ${item.displayName} credential` : `Reveal ${item.displayName} credential`}
+        >
+          {revealed ? <EyeOff size={18} /> : <Eye size={18} />}
+        </button>
+      </div>
       <button className="primary" onClick={async () => { await api("/api/connectors", { method: "POST", body: JSON.stringify({ name: item.name, enabled: !item.enabled, credential: credentials[item.name] }) }); await refresh(); }}>
         <Check size={16} />{item.enabled ? "Disable" : "Enable"}
       </button>
@@ -245,8 +263,23 @@ function Automations() {
       setJsonError(error instanceof Error ? error.message : String(error));
       return;
     }
+    try {
+      await api("/api/automations", { method: "POST", body: JSON.stringify({ automations: parsed }) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      let parsedMessage = message;
+      try {
+        const payload = JSON.parse(message);
+        if (payload && typeof payload === "object" && typeof payload.error === "string") {
+          parsedMessage = payload.error;
+        }
+      } catch {
+        // Server didn't return JSON; surface the raw message.
+      }
+      setJsonError(parsedMessage);
+      return;
+    }
     setJsonError(null);
-    await api("/api/automations", { method: "POST", body: JSON.stringify({ automations: parsed }) });
     await refresh();
   }
   useEffect(() => { void refresh(); }, []);

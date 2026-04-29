@@ -17,6 +17,9 @@ export async function POST(request: Request): Promise<Response> {
 
   try {
     const body = await request.json() as any;
+    if (body == null || typeof body !== "object") {
+      return Response.json({ error: "request body must be a JSON object" }, { status: 400 });
+    }
     const name = connectorNameSchema.parse(body.name);
     let state = getConnectorState(name);
     const requestedEnabled = typeof body.enabled === "boolean" ? body.enabled : state.enabled;

@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 // Note: node:sqlite is an unstable RC API. We attempt to use it but fall back to better-sqlite3 if unavailable.
@@ -10,6 +11,10 @@ import {
   type Automation,
   type PokeConfig
 } from "@poke/shared";
+
+// We use createRequire to load CommonJS native modules (node:sqlite RC export and
+// better-sqlite3) from this ESM module; bare `require` is not defined in ESM.
+const requireFromHere = createRequire(import.meta.url);
 
 export type PokePaths = {
   home: string;
@@ -149,7 +154,12 @@ export function bootstrapPokeHome(options: { home?: string; force?: boolean } = 
   try {
     migrateDatabase(paths);
   } catch (error) {
-    appendLog("warn", "storage.migration_failed", { error: String(error) }, paths);
+    // Fail-fast: a broken schema means subsequent reads/writes will silently
+    // misbehave, so propagate the failure to the caller after recording it.
+    appendLog("error", "storage.migration_failed", {
+      error: error instanceof Error ? error.stack ?? error.message : String(error)
+    }, paths);
+    throw error;
   }
   return paths;
 }
@@ -175,15 +185,15 @@ export function writeJson(file: string, value: unknown): void {
 
 export function openDatabase(paths = getPokePaths()): any {
   ensureDir(path.dirname(paths.database));
-  
+
   // Try node:sqlite first (unstable RC API)
   try {
-    const { DatabaseSync } = require("node:sqlite");
+    const { DatabaseSync } = requireFromHere("node:sqlite");
     return new DatabaseSync(paths.database);
   } catch (sqliteError) {
     // Fall back to better-sqlite3
     try {
-      const Database = require("better-sqlite3");
+      const Database = requireFromHere("better-sqlite3");
       return new Database(paths.database);
     } catch (betterSqliteError) {
       throw new Error(
@@ -280,9 +290,7 @@ type SecretsFile = {
   values: Record<string, string>;
 };
 
-function secretKey(): Buffer {
-  const paths = getPokePaths();
-
+function secretKey(paths: PokePaths = getPokePaths()): Buffer {
   // If POKE_SECRET_KEY is provided, use it
   if (process.env.POKE_SECRET_KEY) {
     return crypto.createHash("sha256").update(process.env.POKE_SECRET_KEY).digest();
@@ -316,20 +324,20 @@ function secretKey(): Buffer {
   return newKey;
 }
 
-function encrypt(value: string): string {
+function encrypt(value: string, paths?: PokePaths): string {
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", secretKey(), iv);
+  const cipher = crypto.createCipheriv("aes-256-gcm", secretKey(paths), iv);
   const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
   return Buffer.concat([iv, tag, encrypted]).toString("base64");
 }
 
-function decrypt(value: string): string {
+function decrypt(value: string, paths?: PokePaths): string {
   const data = Buffer.from(value, "base64");
   const iv = data.subarray(0, 12);
   const tag = data.subarray(12, 28);
   const encrypted = data.subarray(28);
-  const decipher = crypto.createDecipheriv("aes-256-gcm", secretKey(), iv);
+  const decipher = crypto.createDecipheriv("aes-256-gcm", secretKey(paths), iv);
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8");
 }
@@ -339,7 +347,7 @@ export function createInitialSecrets(paths = getPokePaths()): void {
     version: 1,
     keyHint: process.env.POKE_SECRET_KEY ? "env:POKE_SECRET_KEY" : "file:.secret-key",
     values: {
-      "web-session-secret": encrypt(crypto.randomBytes(32).toString("hex"))
+      "web-session-secret": encrypt(crypto.randomBytes(32).toString("hex"), paths)
     }
   };
   writeJson(paths.secrets, file);
@@ -352,7 +360,7 @@ export function setSecret(name: string, value: string, paths = getPokePaths()): 
 export function getSecret(name: string, paths = getPokePaths()): string | null {
   const file = readSecretsFile(paths);
   const value = file.values[name];
-  return value ? decrypt(value) : null;
+  return value ? decrypt(value, paths) : null;
 }
 
 export function deleteSecret(name: string, paths = getPokePaths()): void {
@@ -367,7 +375,7 @@ export function updateSecrets(updates: Record<string, string | null | undefined>
       delete file.values[name];
       continue;
     }
-    file.values[name] = encrypt(value);
+    file.values[name] = encrypt(value, paths);
   }
   writeJson(paths.secrets, file);
 }
