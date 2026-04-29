@@ -1,0 +1,22 @@
+{
+  "name": "poke",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Poke personal agent VPS runtime",
+  "type": "module",
+  "packageManager": "pnpm@10.30.3",
+  "scripts": {
+    "build": "pnpm -r build",
+    "check": "pnpm -r check",
+    "test": "node --import tsx --test \"tests/**/*.test.ts\"",
+    "dev:web": "pnpm --filter @poke/web dev",
+    "dev:gateway": "pnpm --filter @poke/gateway dev",
+    "poke": "pnpm --filter @poke/cli poke",
+    "poke-doctor": "pnpm --filter @poke/doctor poke-doctor"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}

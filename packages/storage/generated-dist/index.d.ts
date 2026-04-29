@@ -1,0 +1,56 @@
+import { type Automation, type PokeConfig } from "@poke/shared";
+export type PokePaths = {
+    home: string;
+    config: string;
+    secrets: string;
+    secretKey: string;
+    database: string;
+    pid: string;
+    session: string;
+    automations: string;
+    memory: string;
+    memoryIndex: string;
+    workspace: string;
+    skills: string;
+    enabledSkills: string;
+    disabledSkills: string;
+    logs: string;
+    backups: string;
+    whatsapp: string;
+};
+export declare function getPokeHome(): string;
+export declare function getPokePaths(home?: string): PokePaths;
+export declare function ensureDir(dir: string): void;
+export declare function pathInside(root: string, candidate: string): boolean;
+export declare function safeResolve(root: string, relativePath: string): string;
+export declare function defaultAutomation(timezone: string): Automation;
+export declare function defaultConfig(paths?: PokePaths, timezone?: string): PokeConfig;
+export declare function bootstrapPokeHome(options?: {
+    home?: string;
+    force?: boolean;
+}): PokePaths;
+export declare function readConfig(paths?: PokePaths): PokeConfig;
+export declare function writeConfig(config: PokeConfig, paths?: PokePaths): void;
+export declare function readAutomations(paths?: PokePaths): Automation[];
+export declare function writeJson(file: string, value: unknown): void;
+export declare function openDatabase(paths?: PokePaths): any;
+export declare function migrateDatabase(paths?: PokePaths): void;
+export declare function audit(action: string, target?: string, metadata?: Record<string, unknown>, actor?: string, paths?: PokePaths): void;
+export declare function appendLog(level: "info" | "warn" | "error", message: string, metadata?: Record<string, unknown>, paths?: PokePaths): void;
+export declare function createInitialSecrets(paths?: PokePaths): void;
+export declare function setSecret(name: string, value: string, paths?: PokePaths): void;
+export declare function getSecret(name: string, paths?: PokePaths): string | null;
+export declare function deleteSecret(name: string, paths?: PokePaths): void;
+export declare function updateSecrets(updates: Record<string, string | null | undefined>, paths?: PokePaths): void;
+export declare function createBackup(label?: string, paths?: PokePaths): string;
+export declare function restoreBackup(backupPath: string, paths?: PokePaths): {
+    restoredFrom: string;
+    safetyBackup: string;
+};
+export declare function listBackups(paths?: PokePaths): Array<{
+    name: string;
+    path: string;
+    createdAt: string;
+}>;
+export declare function listAuditEvents(limit?: number): Array<Record<string, unknown>>;
+export declare function readRecentLogs(lines?: number, paths?: PokePaths): string[];
